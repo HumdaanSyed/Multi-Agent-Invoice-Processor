@@ -1,0 +1,31 @@
+[project]
+name = "invoice-agent"
+version = "0.1.0"
+description = "Production-grade multi-agent invoice processing system (portfolio/Fiverr showcase)."
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=0.75.0",
+    "langgraph>=1.0.0",
+    "langchain>=1.0.0",
+    "langchain-anthropic>=1.0.0",
+    "pydantic>=2.9.0",
+    "supabase>=2.10.0",
+    "python-dotenv>=1.0.1",
+    "langfuse>=2.53.0",
+    "langchain-mcp-adapters>=0.1.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+    "streamlit>=1.40.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+]
+
+[tool.uv.build-backend]
+module-root = ""
+
+[build-system]
+requires = ["uv_build>=0.12.2,<0.13.0"]
+build-backend = "uv_build"

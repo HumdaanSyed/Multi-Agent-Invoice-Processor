@@ -1,0 +1,61 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*credentials*.json
+*gcp-oauth*.json
+*token*.json
+service-account*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv
+.python-version.local
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# LangGraph checkpoints / local state
+*.sqlite
+*.sqlite3
+checkpoints/
+
+# Ingested / working data
+attachments/
+data/samples/*
+!data/samples/.gitkeep
+data/eval/*
+!data/eval/.gitkeep
+docs/
+CLAUDE.md
+
+# Logs
+*.log
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Docker
+*.env.docker
