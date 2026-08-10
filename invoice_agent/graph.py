@@ -146,9 +146,17 @@ def output(state: GraphState) -> dict:
     """Persist the invoice: upload the source PDF, upsert to Supabase (with
     the resulting storage path), and append the CSV export."""
     invoice = state["invoice"]
-    pdf_storage_path = db.upload_pdf(state["file_path"])
-    db.insert_invoice({**invoice, "pdf_storage_path": pdf_storage_path})
-    db.export_invoice_csv(invoice, EXPORT_CSV_PATH)
+    pdf_storage_path = None
+    try:
+        pdf_storage_path = db.upload_pdf(state["file_path"])
+        db.insert_invoice({**invoice, "pdf_storage_path": pdf_storage_path})
+        db.export_invoice_csv(invoice, EXPORT_CSV_PATH)
+    except Exception as exc:
+        raise RuntimeError(
+            f"output failed persisting vendor={invoice.get('vendor_name')!r} "
+            f"invoice_number={invoice.get('invoice_number')!r} "
+            f"(pdf_storage_path={pdf_storage_path!r} - already uploaded if set): {exc}"
+        ) from exc
     return {"status": "completed"}
 
 
@@ -195,7 +203,11 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None):
         route_after_validation,
         {"human_review": "human_review", "output": "output"},
     )
-    graph.add_edge("human_review", "output")
+    # Loop back through the validator (not straight to output) so a human
+    # correction gets fully re-checked - math/dates, and the duplicate check
+    # re-run against the possibly-edited vendor_name/invoice_number - before
+    # anything is persisted. If it's still flagged, this re-interrupts.
+    graph.add_edge("human_review", "validator")
     graph.add_edge("output", END)
 
     return graph.compile(checkpointer=checkpointer or _default_checkpointer())

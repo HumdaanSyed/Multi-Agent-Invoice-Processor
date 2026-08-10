@@ -8,6 +8,7 @@ assumes exist.
 from __future__ import annotations
 
 import csv
+import hashlib
 import os
 from pathlib import Path
 from typing import Optional
@@ -16,7 +17,7 @@ from supabase import Client, create_client
 
 PDF_BUCKET = "invoice-pdfs"
 
-CSV_FIELDS = [
+_HEADER_FIELDS = [
     "invoice_number",
     "invoice_date",
     "vendor_name",
@@ -26,11 +27,13 @@ CSV_FIELDS = [
     "total",
     "due_date",
     "currency",
-    "line_item_description",
-    "line_item_quantity",
-    "line_item_unit_price",
-    "line_item_amount",
 ]
+_LINE_ITEM_FIELDS = ["description", "quantity", "unit_price", "amount"]
+
+# Single source of truth for the CSV column list - export_invoice_csv builds
+# every row from the same two field-name lists above, so the header and the
+# row data can't drift out of sync with each other.
+CSV_FIELDS = _HEADER_FIELDS + [f"line_item_{f}" for f in _LINE_ITEM_FIELDS]
 
 _client: Optional[Client] = None
 
@@ -39,8 +42,13 @@ def get_client() -> Client:
     """Lazily construct (and cache) the Supabase client from env vars."""
     global _client
     if _client is None:
-        url = os.environ["SUPABASE_URL"]
-        key = os.environ["SUPABASE_KEY"]
+        url = os.environ.get("SUPABASE_URL")
+        key = os.environ.get("SUPABASE_KEY")
+        if not url or not key:
+            raise RuntimeError(
+                "SUPABASE_URL / SUPABASE_KEY are not set. Copy .env.example to "
+                ".env and fill in your Supabase project's URL and key."
+            )
         _client = create_client(url, key)
     return _client
 
@@ -63,9 +71,10 @@ def insert_invoice(invoice: dict) -> dict:
     """Upsert the invoice header, then replace its line items.
 
     Upsert key is (vendor_name, invoice_number) - see the unique constraint
-    in `db/schema.sql`. Line items are deleted and re-inserted rather than
-    diffed, which keeps this idempotent for re-runs/corrections without
-    needing per-line-item identity.
+    in `db/schema.sql`. Line items aren't diffed - they're fully replaced -
+    but new rows are inserted *before* old ones are deleted, so a failure
+    between the two steps leaves the previous line items intact (at worst,
+    duplicated) rather than dropping an invoice to zero line items.
     """
     client = get_client()
     line_items = invoice.get("line_items", [])
@@ -76,27 +85,45 @@ def insert_invoice(invoice: dict) -> dict:
         .upsert(invoice_row, on_conflict="vendor_name,invoice_number")
         .execute()
     )
+    if not result.data:
+        raise RuntimeError(
+            "insert_invoice: upsert returned no rows - check that the Supabase "
+            "service key's RLS policy allows reading back the row it just wrote"
+        )
     inserted = result.data[0]
     invoice_id = inserted["id"]
 
-    client.table("line_items").delete().eq("invoice_id", invoice_id).execute()
+    new_ids: list = []
     if line_items:
         rows = [{**item, "invoice_id": invoice_id} for item in line_items]
-        client.table("line_items").insert(rows).execute()
+        insert_result = client.table("line_items").insert(rows).execute()
+        new_ids = [row["id"] for row in insert_result.data]
+
+    delete_query = client.table("line_items").delete().eq("invoice_id", invoice_id)
+    if new_ids:
+        delete_query = delete_query.not_.in_("id", new_ids)
+    delete_query.execute()
 
     return inserted
 
 
 def upload_pdf(path: str | Path) -> str:
-    """Upload the source PDF to Supabase Storage. Returns its storage path."""
+    """Upload the source PDF to Supabase Storage. Returns its storage path.
+
+    The path is prefixed with a content hash rather than using the local
+    filename alone - two different invoices saved locally under the same
+    generic filename (e.g. "invoice.pdf") would otherwise silently overwrite
+    each other in Storage.
+    """
     path = Path(path)
-    storage_path = f"invoices/{path.name}"
-    with open(path, "rb") as f:
-        get_client().storage.from_(PDF_BUCKET).upload(
-            storage_path,
-            f,
-            {"content-type": "application/pdf", "upsert": "true"},
-        )
+    content = path.read_bytes()
+    content_hash = hashlib.sha256(content).hexdigest()[:16]
+    storage_path = f"invoices/{content_hash}_{path.name}"
+    get_client().storage.from_(PDF_BUCKET).upload(
+        storage_path,
+        content,
+        {"content-type": "application/pdf", "upsert": "true"},
+    )
     return storage_path
 
 
@@ -110,6 +137,8 @@ def export_invoice_csv(invoice: dict, out_path: str | Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not out_path.exists()
 
+    header_values = {field: invoice.get(field) for field in _HEADER_FIELDS}
+
     with open(out_path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         if write_header:
@@ -117,20 +146,8 @@ def export_invoice_csv(invoice: dict, out_path: str | Path) -> None:
 
         line_items = invoice.get("line_items") or [{}]
         for item in line_items:
-            writer.writerow(
-                {
-                    "invoice_number": invoice.get("invoice_number"),
-                    "invoice_date": invoice.get("invoice_date"),
-                    "vendor_name": invoice.get("vendor_name"),
-                    "bill_to": invoice.get("bill_to"),
-                    "subtotal": invoice.get("subtotal"),
-                    "tax": invoice.get("tax"),
-                    "total": invoice.get("total"),
-                    "due_date": invoice.get("due_date"),
-                    "currency": invoice.get("currency"),
-                    "line_item_description": item.get("description"),
-                    "line_item_quantity": item.get("quantity"),
-                    "line_item_unit_price": item.get("unit_price"),
-                    "line_item_amount": item.get("amount"),
-                }
+            row = dict(header_values)
+            row.update(
+                {f"line_item_{field}": item.get(field) for field in _LINE_ITEM_FIELDS}
             )
+            writer.writerow(row)
