@@ -1,6 +1,13 @@
-"""Run the full LangGraph pipeline (Phase 2: Router -> Extractor) on a PDF.
+"""Run the full LangGraph pipeline (Router -> Extractor -> Validator ->
+human review) on a PDF, demonstrating the interrupt/resume flow.
 
-Usage: python scripts/run_graph.py <pdf_path>
+Usage:
+  python scripts/run_graph.py <pdf_path>
+
+If the invoice is flagged for review, this script prints the interrupt
+payload (invoice + flags) and prompts for a corrected `total` on the
+terminal, then resumes the graph with `Command(resume=...)`. A clean
+invoice runs straight through with no prompt.
 """
 
 from __future__ import annotations
@@ -11,10 +18,20 @@ import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
+from langgraph.types import Command
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from invoice_agent.graph import graph  # noqa: E402
+from invoice_agent.graph import get_graph  # noqa: E402
+from invoice_agent.validate import validate_invoice  # noqa: E402
+
+
+def _print_invoice(invoice: dict | None) -> None:
+    if invoice is None:
+        print("invoice: (none - not extracted)")
+        return
+    print("invoice:")
+    print(json.dumps(invoice, indent=2))
 
 
 def main() -> int:
@@ -29,8 +46,10 @@ def main() -> int:
 
     load_dotenv()
 
+    graph = get_graph()
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
+    print(f"thread_id: {thread_id}")
 
     initial_state = {
         "file_path": pdf_path,
@@ -43,15 +62,42 @@ def main() -> int:
 
     result = graph.invoke(initial_state, config=config)
 
-    print(f"thread_id: {thread_id}")
-    print(f"doc_type:  {result['doc_type']}")
-    print(f"status:    {result['status']}")
+    if result.get("__interrupt__"):
+        payload = result["__interrupt__"][0].value
+        print("\n--- PAUSED FOR HUMAN REVIEW ---")
+        print("flags:")
+        for flag in payload["flags"]:
+            print(f"  - {flag}")
+        print("\nextracted invoice:")
+        print(json.dumps(payload["invoice"], indent=2))
+
+        current_total = payload["invoice"]["total"]
+        resume_value = {"edited_invoice": None}
+        while True:
+            raw = input(
+                f"\nEnter corrected total (blank to accept {current_total} as-is): "
+            ).strip()
+            if not raw:
+                break
+            try:
+                edited_invoice = {**payload["invoice"], "total": float(raw)}
+                resume_value = {"edited_invoice": edited_invoice}
+                break
+            except ValueError:
+                print(f"  '{raw}' is not a valid number; try again (e.g. 123.45).")
+
+        result = graph.invoke(Command(resume=resume_value), config=config)
+        # human_review doesn't re-run the validator, so re-validate the
+        # (possibly edited) invoice here rather than printing stale flags
+        # from before the correction was applied.
+        result = {**result, "validation": validate_invoice(result["invoice"]).model_dump()}
+
+    print(f"\ndoc_type: {result['doc_type']}")
+    print(f"status:   {result['status']}")
+    if result.get("validation"):
+        print(f"flags:    {result['validation']['flags']}")
     print()
-    if result["invoice"] is not None:
-        print("invoice:")
-        print(json.dumps(result["invoice"], indent=2))
-    else:
-        print("invoice: (none - not extracted)")
+    _print_invoice(result["invoice"])
 
     return 0
 
