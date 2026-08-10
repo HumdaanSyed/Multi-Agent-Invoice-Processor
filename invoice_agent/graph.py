@@ -1,4 +1,4 @@
-"""LangGraph orchestration: Router -> Extractor -> Validator -> (human review) -> Output later.
+"""LangGraph orchestration: Router -> Extractor -> Validator -> (human review) -> Output.
 
 State is a TypedDict; nodes return *partial* state updates only, which
 LangGraph merges into the running state - never return the whole state
@@ -24,8 +24,11 @@ from langgraph.graph.message import add_messages
 from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
+from invoice_agent import db
 from invoice_agent.extract import extract_invoice
 from invoice_agent.validate import validate_invoice
+
+EXPORT_CSV_PATH = Path(__file__).resolve().parent.parent / "exports" / "invoices.csv"
 
 DocType = Literal["invoice", "receipt", "other"]
 
@@ -112,7 +115,7 @@ def extractor(state: GraphState) -> dict:
 
 def validator(state: GraphState) -> dict:
     """Run deterministic business-rule checks on the extracted invoice."""
-    result = validate_invoice(state["invoice"])
+    result = validate_invoice(state["invoice"], duplicate_checker=db.is_duplicate)
     return {
         "validation": result.model_dump(),
         "status": "needs_review" if result.needs_review else "validated",
@@ -139,6 +142,16 @@ def human_review(state: GraphState) -> dict:
     return {"status": "reviewed"}
 
 
+def output(state: GraphState) -> dict:
+    """Persist the invoice: upload the source PDF, upsert to Supabase (with
+    the resulting storage path), and append the CSV export."""
+    invoice = state["invoice"]
+    pdf_storage_path = db.upload_pdf(state["file_path"])
+    db.insert_invoice({**invoice, "pdf_storage_path": pdf_storage_path})
+    db.export_invoice_csv(invoice, EXPORT_CSV_PATH)
+    return {"status": "completed"}
+
+
 def route_after_classification(state: GraphState) -> str:
     """Conditional edge: only invoices proceed to extraction."""
     if state["doc_type"] == "invoice":
@@ -147,10 +160,10 @@ def route_after_classification(state: GraphState) -> str:
 
 
 def route_after_validation(state: GraphState) -> str:
-    """Conditional edge: flagged invoices go to human review, else END."""
+    """Conditional edge: flagged invoices go to human review, clean ones straight to output."""
     if state["validation"]["needs_review"]:
         return "human_review"
-    return END
+    return "output"
 
 
 CHECKPOINT_DB_PATH = Path(__file__).resolve().parent.parent / "checkpoints" / "graph.sqlite"
@@ -168,6 +181,7 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None):
     graph.add_node("extractor", extractor)
     graph.add_node("validator", validator)
     graph.add_node("human_review", human_review)
+    graph.add_node("output", output)
 
     graph.add_edge(START, "router")
     graph.add_conditional_edges(
@@ -179,9 +193,10 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None):
     graph.add_conditional_edges(
         "validator",
         route_after_validation,
-        {"human_review": "human_review", END: END},
+        {"human_review": "human_review", "output": "output"},
     )
-    graph.add_edge("human_review", END)
+    graph.add_edge("human_review", "output")
+    graph.add_edge("output", END)
 
     return graph.compile(checkpointer=checkpointer or _default_checkpointer())
 

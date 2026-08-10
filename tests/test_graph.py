@@ -25,6 +25,6 @@ def test_route_flagged_invoice_goes_to_human_review():
     assert route_after_validation(state) == "human_review"
 
 
-def test_route_clean_invoice_goes_to_end():
+def test_route_clean_invoice_goes_to_output():
     state = {"validation": {"needs_review": False}}
-    assert route_after_validation(state) == END
+    assert route_after_validation(state) == "output"

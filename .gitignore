@@ -42,8 +42,8 @@ data/samples/*
 !data/samples/.gitkeep
 data/eval/*
 !data/eval/.gitkeep
+exports/
 docs/
-CLAUDE.md
 
 # Logs
 *.log
