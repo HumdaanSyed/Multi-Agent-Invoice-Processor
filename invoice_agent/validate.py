@@ -7,12 +7,15 @@ None of this is delegated to the LLM.
 from __future__ import annotations
 
 from datetime import date
+from typing import Callable, Optional
 
 from pydantic import BaseModel, Field
 
 from invoice_agent.schema import Invoice
 
 TOLERANCE = 0.01
+
+DuplicateChecker = Callable[[str, str], bool]
 
 
 class ValidationResult(BaseModel):
@@ -21,15 +24,6 @@ class ValidationResult(BaseModel):
     passed: bool
     flags: list[str] = Field(default_factory=list)
     needs_review: bool
-
-
-def is_duplicate(vendor_name: str, invoice_number: str) -> bool:
-    """Placeholder duplicate check.
-
-    Phase 4 wires this to a Supabase lookup on (vendor_name, invoice_number).
-    Always returns False until then.
-    """
-    return False
 
 
 def _parse_date(value: str | None) -> date | None:
@@ -41,7 +35,10 @@ def _parse_date(value: str | None) -> date | None:
         return None
 
 
-def validate_invoice(invoice: dict | Invoice) -> ValidationResult:
+def validate_invoice(
+    invoice: dict | Invoice,
+    duplicate_checker: Optional[DuplicateChecker] = None,
+) -> ValidationResult:
     """Run deterministic checks against an extracted invoice.
 
     Rules:
@@ -49,7 +46,12 @@ def validate_invoice(invoice: dict | Invoice) -> ValidationResult:
       - subtotal + tax == total (within $0.01)
       - invoice_date and due_date (if present) are parseable ISO dates
       - due_date >= invoice_date
-      - vendor_name/invoice_number is not a known duplicate (placeholder)
+      - vendor_name/invoice_number is not a known duplicate
+
+    `duplicate_checker(vendor_name, invoice_number) -> bool` is optional and
+    defaults to no check at all, so unit tests stay deterministic and
+    offline. The graph's `validator` node wires this to
+    `invoice_agent.db.is_duplicate` for real runs against Supabase.
     """
     inv = invoice if isinstance(invoice, Invoice) else Invoice.model_validate(invoice)
     flags: list[str] = []
@@ -79,7 +81,7 @@ def validate_invoice(invoice: dict | Invoice) -> ValidationResult:
     if invoice_date is not None and due_date is not None and due_date < invoice_date:
         flags.append(f"due_date {inv.due_date} is before invoice_date {inv.invoice_date}")
 
-    if is_duplicate(inv.vendor_name, inv.invoice_number):
+    if duplicate_checker is not None and duplicate_checker(inv.vendor_name, inv.invoice_number):
         flags.append(f"Possible duplicate: vendor={inv.vendor_name!r} number={inv.invoice_number!r}")
 
     passed = len(flags) == 0

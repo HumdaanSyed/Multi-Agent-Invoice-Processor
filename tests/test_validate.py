@@ -52,3 +52,27 @@ def test_unparseable_date_is_flagged():
     result = validate_invoice(broken)
     assert not result.passed
     assert any("not a valid ISO 8601 date" in flag for flag in result.flags)
+
+
+def test_no_duplicate_checker_by_default():
+    """No duplicate_checker passed -> no duplicate flag, no crash, no network."""
+    result = validate_invoice(GOOD_INVOICE)
+    assert result.passed
+
+
+def test_duplicate_checker_flags_when_it_returns_true():
+    result = validate_invoice(GOOD_INVOICE, duplicate_checker=lambda vendor, number: True)
+    assert not result.passed
+    assert any("duplicate" in flag.lower() for flag in result.flags)
+
+
+def test_duplicate_checker_receives_vendor_and_invoice_number():
+    seen = {}
+
+    def checker(vendor_name: str, invoice_number: str) -> bool:
+        seen["vendor_name"] = vendor_name
+        seen["invoice_number"] = invoice_number
+        return False
+
+    validate_invoice(GOOD_INVOICE, duplicate_checker=checker)
+    assert seen == {"vendor_name": "Acme Co", "invoice_number": "INV-1"}

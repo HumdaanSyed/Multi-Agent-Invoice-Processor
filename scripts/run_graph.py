@@ -1,13 +1,17 @@
 """Run the full LangGraph pipeline (Router -> Extractor -> Validator ->
-human review) on a PDF, demonstrating the interrupt/resume flow.
+human review -> Output) on a PDF, demonstrating the interrupt/resume flow.
 
 Usage:
   python scripts/run_graph.py <pdf_path>
 
 If the invoice is flagged for review, this script prints the interrupt
 payload (invoice + flags) and prompts for a corrected `total` on the
-terminal, then resumes the graph with `Command(resume=...)`. A clean
-invoice runs straight through with no prompt.
+terminal, then resumes the graph with `Command(resume=...)`. A correction
+loops back through the validator (math/date checks and the duplicate check,
+re-run against the possibly-edited vendor/invoice number) before anything is
+persisted - if it's still flagged, this script prompts again. A clean
+invoice runs straight through with no prompt, uploads the PDF, upserts to
+Supabase, and appends the CSV export.
 """
 
 from __future__ import annotations
@@ -23,7 +27,6 @@ from langgraph.types import Command
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from invoice_agent.graph import get_graph  # noqa: E402
-from invoice_agent.validate import validate_invoice  # noqa: E402
 
 
 def _print_invoice(invoice: dict | None) -> None:
@@ -62,7 +65,11 @@ def main() -> int:
 
     result = graph.invoke(initial_state, config=config)
 
-    if result.get("__interrupt__"):
+    # A correction loops back through the validator, so it's possible to land
+    # right back at another interrupt if the correction didn't actually fix
+    # the flag(s) - keep prompting until the graph reaches a non-interrupted
+    # state.
+    while result.get("__interrupt__"):
         payload = result["__interrupt__"][0].value
         print("\n--- PAUSED FOR HUMAN REVIEW ---")
         print("flags:")
@@ -87,10 +94,6 @@ def main() -> int:
                 print(f"  '{raw}' is not a valid number; try again (e.g. 123.45).")
 
         result = graph.invoke(Command(resume=resume_value), config=config)
-        # human_review doesn't re-run the validator, so re-validate the
-        # (possibly edited) invoice here rather than printing stale flags
-        # from before the correction was applied.
-        result = {**result, "validation": validate_invoice(result["invoice"]).model_dump()}
 
     print(f"\ndoc_type: {result['doc_type']}")
     print(f"status:   {result['status']}")
