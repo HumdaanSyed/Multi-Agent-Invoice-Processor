@@ -43,7 +43,6 @@ data/samples/*
 data/eval/*
 !data/eval/.gitkeep
 docs/
-CLAUDE.md
 
 # Logs
 *.log
