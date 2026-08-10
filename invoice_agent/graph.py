@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Annotated, Literal, Optional, TypedDict
 
 from anthropic import Anthropic
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -161,7 +162,7 @@ def _default_checkpointer() -> SqliteSaver:
     return SqliteSaver(conn)
 
 
-def build_graph(checkpointer: SqliteSaver | None = None):
+def build_graph(checkpointer: BaseCheckpointSaver | None = None):
     graph = StateGraph(GraphState)
     graph.add_node("router", router)
     graph.add_node("extractor", extractor)
@@ -185,5 +186,20 @@ def build_graph(checkpointer: SqliteSaver | None = None):
     return graph.compile(checkpointer=checkpointer or _default_checkpointer())
 
 
-# Module-level compiled graph, ready to `.invoke()`.
-graph = build_graph()
+_graph_singleton = None
+
+
+def get_graph(checkpointer: BaseCheckpointSaver | None = None):
+    """Lazily build (and cache) the default compiled graph.
+
+    Importing this module must stay side-effect-free - no filesystem writes,
+    no open connections - so the graph is only compiled on first call, not
+    at import time. Callers that want a fresh/custom checkpointer (tests,
+    a future FastAPI app) should call `build_graph()` directly instead.
+    """
+    global _graph_singleton
+    if checkpointer is not None:
+        return build_graph(checkpointer)
+    if _graph_singleton is None:
+        _graph_singleton = build_graph()
+    return _graph_singleton

@@ -22,7 +22,8 @@ from langgraph.types import Command
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from invoice_agent.graph import graph  # noqa: E402
+from invoice_agent.graph import get_graph  # noqa: E402
+from invoice_agent.validate import validate_invoice  # noqa: E402
 
 
 def _print_invoice(invoice: dict | None) -> None:
@@ -45,6 +46,7 @@ def main() -> int:
 
     load_dotenv()
 
+    graph = get_graph()
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
     print(f"thread_id: {thread_id}")
@@ -70,17 +72,25 @@ def main() -> int:
         print(json.dumps(payload["invoice"], indent=2))
 
         current_total = payload["invoice"]["total"]
-        raw = input(
-            f"\nEnter corrected total (blank to accept {current_total} as-is): "
-        ).strip()
-
-        if raw:
-            edited_invoice = {**payload["invoice"], "total": float(raw)}
-            resume_value = {"edited_invoice": edited_invoice}
-        else:
-            resume_value = {"edited_invoice": None}
+        resume_value = {"edited_invoice": None}
+        while True:
+            raw = input(
+                f"\nEnter corrected total (blank to accept {current_total} as-is): "
+            ).strip()
+            if not raw:
+                break
+            try:
+                edited_invoice = {**payload["invoice"], "total": float(raw)}
+                resume_value = {"edited_invoice": edited_invoice}
+                break
+            except ValueError:
+                print(f"  '{raw}' is not a valid number; try again (e.g. 123.45).")
 
         result = graph.invoke(Command(resume=resume_value), config=config)
+        # human_review doesn't re-run the validator, so re-validate the
+        # (possibly edited) invoice here rather than printing stale flags
+        # from before the correction was applied.
+        result = {**result, "validation": validate_invoice(result["invoice"]).model_dump()}
 
     print(f"\ndoc_type: {result['doc_type']}")
     print(f"status:   {result['status']}")
