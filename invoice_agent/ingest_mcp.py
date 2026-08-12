@@ -13,8 +13,12 @@ Two sources ship in this repo:
                         See docs/mcp_setup.md before using this.
 
 A source item is only marked processed if every PDF from it reached a
-terminal, non-interrupted state (completed/skipped) - a flagged invoice is
-left unresolved and will be re-listed on the next run, rather than being
+terminal, non-interrupted state (completed/skipped), OR every remaining
+flag on it is a "possible duplicate" flag (meaning it was already fully
+persisted by an earlier run - most likely a crash between that run's
+Output step and its mark_processed call - so there's nothing left to do
+but stop re-fetching it). Any other flagged/failed invoice is left
+unresolved and will be re-listed on the next run, rather than being
 silently marked done while parked mid-review with nothing in Supabase yet.
 This script does not do interactive review itself; resume a printed
 thread_id separately with `Command(resume=...)`.
@@ -57,15 +61,16 @@ def _find_tool(tools, name: str):
 
 
 def _extract_tool_result(raw):
-    """Normalize an MCP tool call's result into plain Python values.
+    """Normalize an MCP tool call's result into a list of plain Python values.
 
     langchain-mcp-adapters returns a list of MCP content blocks
     (`{"type": "text", "text": ...}`), one block per item of whatever the
     server function returned - and the text encoding depends on the
     underlying type: JSON for a dict/bool, a raw (unquoted) string for a
-    plain str. Try JSON first and fall back to the literal text, which
-    handles all three tools here (list_pending_invoices -> list[dict],
-    download_invoice_pdfs -> list[str], mark_processed -> bool) uniformly.
+    plain str. Try JSON first and fall back to the literal text. Use this
+    for tools whose return type is itself a list (list_pending_invoices,
+    download_invoice_pdfs); use `_extract_scalar_result` for a tool that
+    returns a single scalar (mark_processed).
     """
     if not isinstance(raw, list):
         return raw
@@ -77,6 +82,23 @@ def _extract_tool_result(raw):
         except (json.JSONDecodeError, TypeError):
             values.append(text)
     return values
+
+
+def _extract_scalar_result(raw):
+    """Like `_extract_tool_result`, but for a tool whose return type is a
+    single scalar (mark_processed -> bool), not a list. MCP still wraps a
+    scalar in a one-element content-block list; unwrap that here so the
+    caller gets the actual bool instead of a list, which is truthy even
+    when the underlying value is `False`."""
+    values = _extract_tool_result(raw)
+    return values[0] if values else None
+
+
+def _is_duplicate_only(flags: list[str]) -> bool:
+    """True if every flag on an interrupted invoice is a duplicate flag
+    (see invoice_agent/validate.py's message format) - i.e. nothing else is
+    wrong with it, it was just already persisted by an earlier run."""
+    return bool(flags) and all(f.startswith("Possible duplicate:") for f in flags)
 
 
 async def run_ingestion(source: str, limit: int) -> None:
@@ -111,11 +133,17 @@ async def run_ingestion(source: str, limit: int) -> None:
         item_id = entry["id"]
         print(f"\n=== {entry.get('source_description', item_id)} (id={item_id}) ===")
 
-        paths = _extract_tool_result(
-            await download_tool.ainvoke({"id": item_id, "dest_dir": str(ATTACHMENTS_DIR)})
-        )
+        try:
+            paths = _extract_tool_result(
+                await download_tool.ainvoke({"id": item_id, "dest_dir": str(ATTACHMENTS_DIR)})
+            )
+        except Exception as exc:
+            print(f"  FAILED to download: {exc}")
+            print(f"  leaving {item_id!r} unprocessed (will be re-listed next run)")
+            continue
+
         if not paths:
-            print("  no PDF downloaded, skipping")
+            print("  no PDF downloaded, leaving unprocessed (will be re-listed next run)")
             continue
 
         item_fully_done = True
@@ -142,17 +170,30 @@ async def run_ingestion(source: str, limit: int) -> None:
 
             if result.get("__interrupt__"):
                 flags = result["__interrupt__"][0].value.get("flags", [])
-                print(f"    needs review (thread_id={thread_id}): {flags}")
-                print(
-                    "    left unresolved - resume with Command(resume=...) against "
-                    "this thread_id, then re-run ingestion to mark it processed"
-                )
-                item_fully_done = False
+                if _is_duplicate_only(flags):
+                    # Already fully persisted by an earlier run (most likely
+                    # a crash between that run's Output step and its
+                    # mark_processed call) - nothing to review, just stop
+                    # re-fetching it. Nothing new is written here.
+                    print(f"    already processed previously (duplicate): {flags}")
+                else:
+                    print(f"    needs review (thread_id={thread_id}): {flags}")
+                    print(
+                        "    left unresolved - resume with Command(resume=...) against "
+                        "this thread_id, then re-run ingestion to mark it processed"
+                    )
+                    item_fully_done = False
             else:
                 print(f"    status={result['status']} doc_type={result['doc_type']}")
 
         if item_fully_done:
-            await mark_tool.ainvoke({"id": item_id})
+            try:
+                marked = _extract_scalar_result(await mark_tool.ainvoke({"id": item_id}))
+            except Exception as exc:
+                print(f"  FAILED to mark {item_id!r} processed: {exc}")
+                continue
+            if not marked:
+                print(f"  WARNING: mark_processed returned falsy for {item_id!r} - it may be re-listed next run")
         else:
             print(f"  leaving {item_id!r} unprocessed (will be re-listed next run)")
 

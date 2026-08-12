@@ -10,6 +10,12 @@ setting the \\Seen flag in `mark_processed` (never delete, never send).
 Every IMAP fetch uses BODY.PEEK so *reading* a message never marks it seen
 as a side effect - only `mark_processed` does that, explicitly.
 
+All three tools operate via IMAP UID commands (`conn.uid(...)`), not plain
+sequence-number commands - sequence numbers are only valid within the
+session that produced them, and a fresh `_connect()` is opened per tool
+call, so a plain (non-UID) command would risk operating on the wrong
+message if the mailbox changed between calls. UIDs are stable identifiers.
+
 Setup: enable 2FA on the Gmail account, generate an App Password at
 https://myaccount.google.com/apppasswords, then set GMAIL_ADDRESS and
 GMAIL_APP_PASSWORD in .env. See docs/mcp_setup.md for the full walkthrough
@@ -25,13 +31,12 @@ from __future__ import annotations
 import email
 import imaplib
 import os
+from email.header import decode_header
 from email.message import Message
 from pathlib import Path
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
-
-load_dotenv()
 
 IMAP_HOST = "imap.gmail.com"
 IMAP_PORT = 993
@@ -40,6 +45,9 @@ mcp = FastMCP("gmail-imap")
 
 
 def _connect() -> imaplib.IMAP4_SSL:
+    # Loaded here, not at module import time, so importing this module (e.g.
+    # for its pure helper functions in tests) has no filesystem side effect.
+    load_dotenv()
     address = os.environ.get("GMAIL_ADDRESS")
     app_password = os.environ.get("GMAIL_APP_PASSWORD")
     if not address or not app_password:
@@ -52,20 +60,58 @@ def _connect() -> imaplib.IMAP4_SSL:
     return conn
 
 
-def _pdf_attachment_filenames(msg: Message) -> list[str]:
-    filenames = []
+def _decode_mime_words(value: str | None) -> str | None:
+    """Decode an RFC 2047 encoded-word header/filename (e.g. '=?UTF-8?B?...?=')
+    into plain text. Non-ASCII invoice filenames/subjects are commonly sent
+    this way; without decoding, `.endswith(".pdf")` and human-readable
+    display both fail on them."""
+    if not value:
+        return value
+    try:
+        parts = decode_header(value)
+    except Exception:
+        return value
+    decoded = []
+    for part, charset in parts:
+        if isinstance(part, bytes):
+            decoded.append(part.decode(charset or "utf-8", errors="replace"))
+        else:
+            decoded.append(part)
+    return "".join(decoded)
+
+
+def _pdf_attachments(msg: Message) -> list[tuple[str, bytes]]:
+    """Return (filename, payload_bytes) for every PDF-named part of the
+    message - the single source of truth both `list_pending_invoices` and
+    `download_invoice_pdfs` use, so they can never disagree about which
+    parts count as PDF attachments.
+
+    Matches on filename alone (decoded, case-insensitive `.pdf` suffix),
+    not on Content-Disposition: many billing/ERP mailers omit that header
+    entirely or use "inline" rather than "attachment". Skips parts whose
+    payload can't be decoded, so a part `list_pending_invoices` reports is
+    guaranteed to also be downloadable by `download_invoice_pdfs`.
+    """
+    found = []
     for part in msg.walk():
-        if part.get_content_disposition() != "attachment":
+        filename = _decode_mime_words(part.get_filename())
+        if not filename or not filename.lower().endswith(".pdf"):
             continue
-        filename = part.get_filename()
-        if filename and filename.lower().endswith(".pdf"):
-            filenames.append(filename)
-    return filenames
+        payload = part.get_payload(decode=True)
+        if payload is None:
+            continue
+        found.append((filename, payload))
+    return found
+
+
+def _pdf_attachment_filenames(msg: Message) -> list[str]:
+    """Thin wrapper over `_pdf_attachments` for callers that only need names."""
+    return [filename for filename, _ in _pdf_attachments(msg)]
 
 
 def _fetch_message(conn: imaplib.IMAP4_SSL, uid: bytes) -> Message | None:
-    """Fetch a message body without marking it \\Seen (BODY.PEEK)."""
-    status, msg_data = conn.fetch(uid, "(BODY.PEEK[])")
+    """Fetch a message body by UID without marking it \\Seen (BODY.PEEK)."""
+    status, msg_data = conn.uid("fetch", uid, "(BODY.PEEK[])")
     if status != "OK" or not msg_data or msg_data[0] is None:
         return None
     raw = msg_data[0][1]
@@ -92,7 +138,7 @@ def list_pending_invoices(limit: int = 10) -> list[dict]:
     conn = _connect()
     try:
         gmail_query = "is:unread has:attachment filename:pdf"
-        status, data = conn.search(None, "X-GM-RAW", f'"{gmail_query}"')
+        status, data = conn.uid("search", None, "X-GM-RAW", f'"{gmail_query}"')
         if status != "OK":
             raise RuntimeError(f"Gmail search (X-GM-RAW) failed: {data}")
         if not data or not data[0]:
@@ -101,6 +147,8 @@ def list_pending_invoices(limit: int = 10) -> list[dict]:
 
         results = []
         for uid in uids:
+            if len(results) >= limit:
+                break
             msg = _fetch_message(conn, uid)
             if msg is None:
                 continue
@@ -111,15 +159,15 @@ def list_pending_invoices(limit: int = 10) -> list[dict]:
             pdf_names = _pdf_attachment_filenames(msg)
             if not pdf_names:
                 continue
+            subject = _decode_mime_words(msg.get("Subject")) or "(no subject)"
+            sender = _decode_mime_words(msg.get("From")) or "?"
             results.append(
                 {
                     "id": uid.decode(),
-                    "source_description": f"{msg.get('Subject', '(no subject)')} - from {msg.get('From', '?')}",
+                    "source_description": f"{subject} - from {sender}",
                     "attachment_filenames": pdf_names,
                 }
             )
-            if len(results) >= limit:
-                break
         return results
     finally:
         conn.logout()
@@ -142,18 +190,14 @@ def download_invoice_pdfs(id: str, dest_dir: str = "./attachments") -> list[str]
         dest.mkdir(parents=True, exist_ok=True)
 
         written = []
-        for part in msg.walk():
-            if part.get_content_disposition() != "attachment":
-                continue
-            filename = part.get_filename()
-            if not filename or not filename.lower().endswith(".pdf"):
-                continue
-            payload = part.get_payload(decode=True)
-            if payload is None:
-                continue
+        for filename, payload in _pdf_attachments(msg):
             # Prefix with the UID so two attachments named identically
-            # (e.g. "invoice.pdf" from different senders) never collide.
-            out_path = dest / f"{id}_{filename}"
+            # (e.g. "invoice.pdf" from different senders) never collide, and
+            # take only the basename of the (untrusted, MIME-supplied)
+            # filename so an attacker-controlled name like
+            # "../../../etc/x.pdf" can't write outside dest_dir.
+            safe_name = Path(filename).name
+            out_path = dest / f"{id}_{safe_name}"
             out_path.write_bytes(payload)
             written.append(str(out_path))
         return written
@@ -167,7 +211,7 @@ def mark_processed(id: str) -> bool:
     won't list it again. This is the only mailbox mutation this server does."""
     conn = _connect()
     try:
-        status, _ = conn.store(id.encode(), "+FLAGS", "\\Seen")
+        status, _ = conn.uid("store", id.encode(), "+FLAGS", "\\Seen")
         return status == "OK"
     finally:
         conn.logout()
