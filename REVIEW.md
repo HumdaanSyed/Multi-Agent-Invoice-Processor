@@ -77,9 +77,52 @@ instance of any of these as high-confidence, not merely plausible:
 - **Import-time side effects.** Module import must not touch the
   filesystem, open a DB/network connection, or do other I/O — compile
   graphs/clients lazily (see `get_graph()` in `invoice_agent/graph.py`).
+- **Unbounded serial network fetch over an unfiltered result set.**
+  Iterating every result of a broad search/list call and doing a heavy
+  per-item network fetch just to filter client-side, instead of pushing the
+  filter into the query itself. Bit us in
+  `invoice_agent/mcp_servers/gmail_imap.py`'s `list_pending_invoices`:
+  IMAP-searched all `UNSEEN` messages (1,147 on a real account) and did a
+  full `BODY.PEEK[]` fetch on each one just to check for a PDF attachment,
+  instead of filtering server-side first (Gmail's `X-GM-RAW` search
+  extension) — ~25 min worst case instead of ~8s. Any future "list X, then
+  inspect each one in detail to decide if it matches" loop against a remote
+  API is a candidate for this, regardless of which API it is.
 - **Filename-only uniqueness assumptions** for anything derived from
   user-supplied or ingested files (e.g. Storage paths) — two different
   source documents can share a filename.
+- **Session-scoped identifiers treated as stable across separate calls.**
+  IMAP message sequence numbers (as opposed to UIDs) are only valid within
+  the connection/session that produced them — bit us in
+  `gmail_imap.py`, where `list_pending_invoices` returned a sequence number
+  that a later `download_invoice_pdfs`/`mark_processed` call (a fresh
+  `_connect()` session) could silently resolve to a different message if
+  the mailbox changed in between. Fixed via `conn.uid(...)` throughout. Any
+  identifier handed back across two separate connections/sessions to an
+  external system is a candidate for this — check whether the protocol
+  guarantees that identifier survives a new session, or only a stable ID
+  (like a UID, not an index/offset/sequence number) does.
+- **Untrusted filenames/ids used directly as local path components.** Any
+  value that crosses a trust boundary (a MIME attachment filename from an
+  inbound email, an MCP tool's caller-supplied `id` argument) and gets
+  concatenated into a filesystem path without reducing it to just its
+  basename (`Path(x).name`) is a path-traversal candidate — a value like
+  `"../../.env"` resolves outside the intended directory. Bit us in both
+  `gmail_imap.py`'s `download_invoice_pdfs` (MIME filename) and
+  `filesystem_invoices.py`'s `download_invoice_pdfs`/`mark_processed`
+  (MCP tool `id` argument, independently callable e.g. via the MCP
+  Inspector — not restricted to values the server itself produced).
+- **Overly strict matching on an external system's loosely-specified data.**
+  Real-world MIME/email producers vary more than the "happy path" a first
+  implementation assumes — `Content-Disposition` is sometimes absent or
+  `inline` rather than `attachment`, filenames are sometimes RFC 2047
+  encoded-words, extensions vary in case. Matching on the narrowest signal
+  (an exact disposition string, a case-sensitive suffix) instead of the
+  loosest correct one (does this part have a decoded, `.pdf`-suffixed
+  filename at all?) silently drops real data with no error. When reviewing
+  code that parses/filters real-world external input (email, uploaded
+  files, third-party API responses), ask what the loosest correct
+  matching rule is, not just whether today's happy-path test passes.
 
 ## Known intentional patterns — do not re-flag
 
