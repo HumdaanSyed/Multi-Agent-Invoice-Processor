@@ -38,16 +38,17 @@ State is a `TypedDict`: `file_path`, `doc_type`, `invoice`, `validation`, `statu
 - `python scripts/smoke_test.py` — verify all service connections (Anthropic, Supabase)
 - `python -m invoice_agent.extract <pdf_path>` — test single-PDF extraction
 - `python scripts/run_graph.py <pdf_path>` — run the full LangGraph pipeline
+- `python -m invoice_agent.ingest_mcp --source filesystem|gmail` — pull invoices via MCP and run each through the graph (see `docs/mcp_setup.md`)
 - `python evals/run_eval.py` — run the eval harness, outputs `evals/report.md`
 - `uvicorn app.main:app --reload` — run backend locally
 - `streamlit run frontend/app.py` — run frontend locally
 - `docker compose up` — run full stack in containers
 
 ## Current Phase
-Phase 5: MCP integration
+Phase 6: evaluation harness
 
 ## Roadmap
-The full 11-phase build plan lives in `docs/ROADMAP.md` (not auto-loaded here, it's long). At the start of a session working on a new phase, say: "Read docs/ROADMAP.md, we're on Phase 5, implement it."
+The full 11-phase build plan lives in `docs/ROADMAP.md` (not auto-loaded here, it's long). At the start of a session working on a new phase, say: "Read docs/ROADMAP.md, we're on Phase 6, implement it."
 
 ## Known Pitfalls (don't relearn these)
 - Never combine `citations` with structured outputs on the same Claude API call, it errors

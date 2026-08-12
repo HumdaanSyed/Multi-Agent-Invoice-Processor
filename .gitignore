@@ -42,6 +42,8 @@ data/samples/*
 !data/samples/.gitkeep
 data/eval/*
 !data/eval/.gitkeep
+data/inbox/*
+!data/inbox/.gitkeep
 exports/
 docs/
 

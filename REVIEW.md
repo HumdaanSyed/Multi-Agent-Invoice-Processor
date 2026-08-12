@@ -77,6 +77,17 @@ instance of any of these as high-confidence, not merely plausible:
 - **Import-time side effects.** Module import must not touch the
   filesystem, open a DB/network connection, or do other I/O — compile
   graphs/clients lazily (see `get_graph()` in `invoice_agent/graph.py`).
+- **Unbounded serial network fetch over an unfiltered result set.**
+  Iterating every result of a broad search/list call and doing a heavy
+  per-item network fetch just to filter client-side, instead of pushing the
+  filter into the query itself. Bit us in
+  `invoice_agent/mcp_servers/gmail_imap.py`'s `list_pending_invoices`:
+  IMAP-searched all `UNSEEN` messages (1,147 on a real account) and did a
+  full `BODY.PEEK[]` fetch on each one just to check for a PDF attachment,
+  instead of filtering server-side first (Gmail's `X-GM-RAW` search
+  extension) — ~25 min worst case instead of ~8s. Any future "list X, then
+  inspect each one in detail to decide if it matches" loop against a remote
+  API is a candidate for this, regardless of which API it is.
 - **Filename-only uniqueness assumptions** for anything derived from
   user-supplied or ingested files (e.g. Storage paths) — two different
   source documents can share a filename.
