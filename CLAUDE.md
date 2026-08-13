@@ -27,6 +27,8 @@ Graph: `Router -> Extractor -> Validator -> (interrupt if flagged) -> Output`
 
 State is a `TypedDict`: `file_path`, `doc_type`, `invoice`, `validation`, `status`, `messages`. Nodes return partial state updates only. Checkpointer is `SqliteSaver` (never `InMemorySaver` once the FastAPI backend exists, state must survive across requests).
 
+Every `graph.invoke()` is traced via `invoice_agent/tracing.py` (optional — no-op without `LANGFUSE_PUBLIC_KEY`/`SECRET_KEY`). LangGraph's node tree is auto-captured by the `langfuse.langchain.CallbackHandler` passed in `config`; the two raw-`anthropic`-SDK calls (router, extractor) are manually recorded as generation spans since they bypass `langchain_anthropic`. See `docs/observability.md`.
+
 ## Conventions
 - All inter-agent data contracts are Pydantic models, not raw dicts
 - Business-rule validation (math, dates, duplicates) is plain Python, never delegated to the LLM
@@ -45,10 +47,10 @@ State is a `TypedDict`: `file_path`, `doc_type`, `invoice`, `validation`, `statu
 - `docker compose up` — run full stack in containers
 
 ## Current Phase
-Phase 7: observability (Langfuse tracing)
+Phase 8: FastAPI backend
 
 ## Roadmap
-The full 11-phase build plan lives in `docs/ROADMAP.md` (not auto-loaded here, it's long). At the start of a session working on a new phase, say: "Read docs/ROADMAP.md, we're on Phase 7, implement it."
+The full 11-phase build plan lives in `docs/ROADMAP.md` (not auto-loaded here, it's long). At the start of a session working on a new phase, say: "Read docs/ROADMAP.md, we're on Phase 8, implement it."
 
 ## Known Pitfalls (don't relearn these)
 - Never combine `citations` with structured outputs on the same Claude API call, it errors
@@ -58,6 +60,8 @@ The full 11-phase build plan lives in `docs/ROADMAP.md` (not auto-loaded here, i
 - Run a single Uvicorn worker on 1GB RAM instances, multiple workers will OOM
 - Supabase free-tier projects pause after 7 days of inactivity, reactivate before demos
 - MCP `stdio` transport is local-machine only, a deployed backend needs an HTTP-transport MCP server or a separate local/cron ingestion job
+- `LANGFUSE_HOST` defaults to the EU Langfuse Cloud host if unset - a project on the US region needs it set explicitly, or traces silently go to the wrong region and never appear
+- Short-lived scripts must call `invoice_agent.tracing.flush()` before exiting (traces send asynchronously in the background) - a long-running process like the future FastAPI backend won't need this
 
 ## Working Style
 - Follow the phase order in the project roadmap, don't skip ahead to later phases before earlier ones are solid

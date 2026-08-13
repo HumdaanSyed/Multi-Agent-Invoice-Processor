@@ -25,7 +25,9 @@ from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
 from invoice_agent import db
+from invoice_agent.extract import MODEL as EXTRACT_MODEL
 from invoice_agent.extract import extract_invoice
+from invoice_agent.tracing import trace_callbacks, traced_generation
 from invoice_agent.validate import validate_invoice
 
 EXPORT_CSV_PATH = Path(__file__).resolve().parent.parent / "exports" / "invoices.csv"
@@ -75,28 +77,32 @@ def router(state: GraphState) -> dict:
     pdf_b64 = _load_pdf_b64(state["file_path"])
 
     client = Anthropic()
-    response = client.messages.parse(
-        model=ROUTER_MODEL,
-        max_tokens=ROUTER_MAX_TOKENS,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "document",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "application/pdf",
-                            "data": pdf_b64,
+    with traced_generation(
+        "router-classify", model=ROUTER_MODEL, input_data={"file_path": state["file_path"]}
+    ) as gen:
+        response = client.messages.parse(
+            model=ROUTER_MODEL,
+            max_tokens=ROUTER_MAX_TOKENS,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": pdf_b64,
+                            },
                         },
-                    },
-                    {"type": "text", "text": ROUTER_PROMPT},
-                ],
-            }
-        ],
-        output_format=DocumentClassification,
-    )
-    classification = response.parsed_output
+                        {"type": "text", "text": ROUTER_PROMPT},
+                    ],
+                }
+            ],
+            output_format=DocumentClassification,
+        )
+        classification = response.parsed_output
+        gen.record(output=classification.model_dump(), usage=response.usage)
 
     return {
         "doc_type": classification.doc_type,
@@ -106,7 +112,20 @@ def router(state: GraphState) -> dict:
 
 def extractor(state: GraphState) -> dict:
     """Extract structured invoice data via the Phase 1 function."""
-    invoice = extract_invoice(state["file_path"])
+    response = None
+
+    def _capture_response(r):
+        nonlocal response
+        response = r
+
+    with traced_generation(
+        "extract-invoice", model=EXTRACT_MODEL, input_data={"file_path": state["file_path"]}
+    ) as gen:
+        invoice = extract_invoice(state["file_path"], on_response=_capture_response)
+        gen.record(
+            output=invoice.model_dump(mode="json"),
+            usage=response.usage if response is not None else None,
+        )
     return {
         "invoice": invoice.model_dump(mode="json"),
         "status": "extracted",
@@ -230,3 +249,13 @@ def get_graph(checkpointer: BaseCheckpointSaver | None = None):
     if _graph_singleton is None:
         _graph_singleton = build_graph()
     return _graph_singleton
+
+
+def build_invoke_config(thread_id: str) -> dict:
+    """The `config` dict every `graph.invoke()`/`graph.invoke(Command(resume=...))`
+    call needs: the checkpointer's thread_id plus tracing callbacks (an
+    empty list if tracing isn't configured). Shared here so
+    scripts/run_graph.py, invoice_agent/ingest_mcp.py, and any future
+    caller (e.g. Phase 8's FastAPI backend) build it identically instead
+    of each re-implementing the same two-key dict."""
+    return {"configurable": {"thread_id": thread_id}, "callbacks": trace_callbacks(thread_id)}
