@@ -112,6 +112,31 @@ instance of any of these as high-confidence, not merely plausible:
   `filesystem_invoices.py`'s `download_invoice_pdfs`/`mark_processed`
   (MCP tool `id` argument, independently callable e.g. via the MCP
   Inspector — not restricted to values the server itself produced).
+- **Unguarded optional-integration SDK calls in a path that must never
+  hard-fail.** Any call into a third-party SDK for a feature that is
+  explicitly optional/degrade-to-no-op (tracing, metrics, logging-as-a-
+  service) needs its own `try/except` — not just a top-level
+  `tracing_enabled()`-style flag check — because the SDK can still throw
+  once actually invoked (bad credentials, unreachable host, wrong region).
+  Two distinct failure points, both bit us in `invoice_agent/tracing.py`
+  (Phase 7 review): an **entry-time** failure (constructing a handler/
+  starting an observation) must not prevent the wrapped business call from
+  running at all; an **exit-time** failure (a post-success `flush()` or a
+  `.update()` on an already-open span) must not convert work that already
+  completed successfully into a reported failure. Check both ends of any
+  new optional-integration call, not just the one that's easiest to guard.
+- **Dependency version bound looser than the API surface actually used.**
+  `pyproject.toml` pinning a package to `>=X.Y.0` when the code calls APIs
+  that only exist from a later *major* version onward — bit us with
+  `langfuse>=2.53.0` while using v3+-only entry points
+  (`langfuse.langchain.CallbackHandler`, `get_client().start_as_current_observation`)
+  that don't exist in v2 (Phase 7 review). The lockfile hides this because
+  it already resolved a compatible version; a fresh install without the
+  lockfile (CI cache miss, a new contributor, Docker rebuild) can resolve
+  the oldest version satisfying the bound and fail at import or call time.
+  When a diff starts using APIs introduced in a specific major version,
+  check the dependency's lower bound requires at least that major, not
+  just "some version that happens to work with what's currently locked."
 - **Overly strict matching on an external system's loosely-specified data.**
   Real-world MIME/email producers vary more than the "happy path" a first
   implementation assumes — `Content-Disposition` is sometimes absent or
@@ -123,6 +148,19 @@ instance of any of these as high-confidence, not merely plausible:
   code that parses/filters real-world external input (email, uploaded
   files, third-party API responses), ask what the loosest correct
   matching rule is, not just whether today's happy-path test passes.
+- **An identifier silently doing double duty across two systems.** A value
+  minted for one purpose (LangGraph's `thread_id`, a checkpoint key) gets
+  reused as the uniqueness key for an unrelated second system (Langfuse
+  trace identity, derived via `create_trace_id(seed=thread_id)`) with no
+  enforcement that the second system's uniqueness requirement actually
+  holds. Currently safe in `invoice_agent/tracing.py` because every caller
+  mints a fresh `uuid.uuid4()` — but nothing stops a future caller from
+  reusing a `thread_id` (e.g. a retry-with-same-thread pattern) and
+  silently merging two unrelated runs into one trace. Lower severity than
+  the other patterns here — usually a doc-comment fix, not a functional
+  one — but worth a check whenever a diff adds a new caller of an
+  identifier that already has an established uniqueness contract for one
+  purpose.
 
 ## Known intentional patterns — do not re-flag
 

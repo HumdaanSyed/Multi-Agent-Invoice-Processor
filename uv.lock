@@ -563,7 +563,7 @@ requires-dist = [
     { name = "langchain", specifier = ">=1.0.0" },
     { name = "langchain-anthropic", specifier = ">=1.0.0" },
     { name = "langchain-mcp-adapters", specifier = ">=0.1.0" },
-    { name = "langfuse", specifier = ">=2.53.0" },
+    { name = "langfuse", specifier = ">=3.0.0" },
     { name = "langgraph", specifier = ">=1.0.0" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3.1.1" },
     { name = "mcp", specifier = ">=1.29.0" },

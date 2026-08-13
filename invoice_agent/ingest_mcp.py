@@ -40,9 +40,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
-from invoice_agent.graph import get_graph
+from invoice_agent.graph import build_invoke_config, get_graph
 from invoice_agent.tracing import flush as flush_traces
-from invoice_agent.tracing import trace_callbacks
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ATTACHMENTS_DIR = REPO_ROOT / "attachments"
@@ -151,7 +150,7 @@ async def run_ingestion(source: str, limit: int) -> None:
         item_fully_done = True
         for pdf_path in paths:
             thread_id = str(uuid.uuid4())
-            config = {"configurable": {"thread_id": thread_id}, "callbacks": trace_callbacks(thread_id)}
+            config = build_invoke_config(thread_id)
             print(f"  processing {pdf_path} (thread_id={thread_id})")
             try:
                 result = graph.invoke(
