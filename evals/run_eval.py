@@ -76,7 +76,11 @@ def _predict(pdf_path: Path, model: str, use_cache: bool) -> tuple[dict | None, 
     except Exception as exc:  # noqa: BLE001 - the harness must survive one bad PDF
         predicted, error = None, f"{type(exc).__name__}: {exc}"
 
-    if use_cache:
+    # Only cache successes. A failure isn't reusable the way a prediction
+    # is (there's nothing to re-score), and caching one would pin a
+    # possibly-transient error (rate limit, network blip) in place forever
+    # instead of letting the next run simply retry.
+    if use_cache and error is None:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps({"predicted": predicted, "error": error}, indent=2))
 
@@ -159,7 +163,9 @@ def main() -> int:
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
     parser.add_argument("--out", type=Path, default=DEFAULT_REPORT)
     parser.add_argument("--limit", type=int, default=None, help="score only the first N items")
-    parser.add_argument("--no-cache", action="store_true", help="ignore and overwrite the prediction cache")
+    parser.add_argument(
+        "--no-cache", action="store_true", help="bypass the prediction cache (do not read or write it)"
+    )
     parser.add_argument("--fail-fast", action="store_true", help="abort on the first extraction error")
     parser.add_argument("--model", default=MODEL, help="override the extraction model")
     args = parser.parse_args()

@@ -183,6 +183,11 @@ def _score_due_date(gold_value, pred_value, extraction_failed: bool) -> FieldOut
     if gold_norm is None and pred_norm is not None:
         return FieldOutcome("due_date", fp=1, exact=False)
     if gold_norm is not None and pred_norm is None:
+        if pred_value:
+            # A non-empty prediction that failed to normalize is a wrong
+            # assertion, not a missed one - matches _score_scalar_field's
+            # convention (an unparseable invoice_date scores fp+fn too).
+            return FieldOutcome("due_date", fp=1, fn=1, exact=False)
         return FieldOutcome("due_date", fn=1, exact=False)
     if values_equal(pred_norm, gold_norm, "date"):
         return FieldOutcome("due_date", tp=1, exact=True)

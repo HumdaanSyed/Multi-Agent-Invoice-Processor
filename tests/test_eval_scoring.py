@@ -169,6 +169,19 @@ def test_score_document_due_date_missed_is_false_negative():
     result = score_document("doc-1", {}, GOLD, pred, error=None)
     due_date_outcome = next(o for o in result.field_outcomes if o.field == "due_date")
     assert due_date_outcome.fn == 1
+    assert due_date_outcome.fp == 0
+
+
+def test_score_document_due_date_unparseable_but_present_is_false_positive_and_negative():
+    """A non-empty prediction that fails to normalize (e.g. 'Q3 2026') is a
+    wrong assertion, not silence - must match invoice_date's fp+fn
+    convention, not be scored the same as a genuinely missing prediction."""
+    pred = {**_perfect_prediction(), "due_date": "Q3 2026"}
+    result = score_document("doc-1", {}, GOLD, pred, error=None)
+    due_date_outcome = next(o for o in result.field_outcomes if o.field == "due_date")
+    assert due_date_outcome.fp == 1
+    assert due_date_outcome.fn == 1
+    assert due_date_outcome.tp == 0
 
 
 def test_score_document_extraction_failure_is_all_misses_no_false_positives():

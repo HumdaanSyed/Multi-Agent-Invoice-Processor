@@ -36,7 +36,7 @@ def render_field_table(agg: EvalResult) -> str:
     return "\n".join(rows)
 
 
-def render_headline(agg: EvalResult, model: str) -> str:
+def render_headline(agg: EvalResult) -> str:
     lines = [
         f"- **Extraction success rate:** {agg.extraction_success_count}/{agg.n_documents} "
         f"({_pct(agg.extraction_success_rate)})",
@@ -136,6 +136,13 @@ def render_notes(results: list[DocumentResult]) -> str:
                     f"- `{r.doc_id}`: predicted `{spec.name}` = "
                     f"{r.predicted.get(spec.name)!r} did not parse as a date"
                 )
+        # due_date isn't in SCALAR_FIELDS (it's optional, scored separately -
+        # see _score_due_date), but an unparseable-yet-present prediction is
+        # exactly the case this section exists to surface. A genuinely
+        # absent due_date is a correct abstention, not a warning.
+        raw_due = r.predicted.get("due_date")
+        if raw_due and normalize_date(raw_due) is None:
+            notes.append(f"- `{r.doc_id}`: predicted `due_date` = {raw_due!r} did not parse as a date")
     if not notes:
         return "No unparseable dates or other normalization warnings."
     return "\n".join(notes)
@@ -208,7 +215,7 @@ def render_report(
         "",
         "## Headline",
         "",
-        render_headline(agg, model),
+        render_headline(agg),
         "",
         "## Per-field metrics",
         "",
@@ -248,7 +255,7 @@ def render_stdout_summary(agg: EvalResult, model: str) -> str:
             "=== Extraction Eval ===",
             f"Model: {model}",
             "",
-            render_headline(agg, model),
+            render_headline(agg),
             "",
             render_field_table(agg),
         ]
