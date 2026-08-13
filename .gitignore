@@ -40,12 +40,15 @@ checkpoints/
 attachments/
 data/samples/*
 !data/samples/.gitkeep
-data/eval/*
-!data/eval/.gitkeep
 data/inbox/*
 !data/inbox/.gitkeep
 exports/
 docs/
+
+# Eval harness - data/eval/*.pdf, evals/dataset.jsonl, and evals/report.md
+# are committed deliverables (synthetic fixtures, no privacy exposure; see
+# scripts/generate_eval_set.py). Only the prediction cache is transient.
+evals/.cache/
 
 # Logs
 *.log
