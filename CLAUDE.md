@@ -45,10 +45,10 @@ State is a `TypedDict`: `file_path`, `doc_type`, `invoice`, `validation`, `statu
 - `docker compose up` — run full stack in containers
 
 ## Current Phase
-Phase 6: evaluation harness
+Phase 7: observability (Langfuse tracing)
 
 ## Roadmap
-The full 11-phase build plan lives in `docs/ROADMAP.md` (not auto-loaded here, it's long). At the start of a session working on a new phase, say: "Read docs/ROADMAP.md, we're on Phase 6, implement it."
+The full 11-phase build plan lives in `docs/ROADMAP.md` (not auto-loaded here, it's long). At the start of a session working on a new phase, say: "Read docs/ROADMAP.md, we're on Phase 7, implement it."
 
 ## Known Pitfalls (don't relearn these)
 - Never combine `citations` with structured outputs on the same Claude API call, it errors

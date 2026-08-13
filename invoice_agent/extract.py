@@ -31,11 +31,15 @@ EXTRACTION_PROMPT = (
 )
 
 
-def extract_invoice(pdf_path: str | Path) -> Invoice:
+def extract_invoice(pdf_path: str | Path, model: str | None = None) -> Invoice:
     """Extract a validated Invoice from a single PDF file.
 
     Args:
         pdf_path: Path to the invoice PDF.
+        model: Override the default extraction model (`MODEL`). Exists so
+            the eval harness (evals/run_eval.py) can score other models
+            (e.g. Haiku for cost, Opus for hard scanned docs) without
+            duplicating this function - see CLAUDE.md's model-routing note.
 
     Returns:
         A validated `Invoice` Pydantic object.
@@ -48,7 +52,7 @@ def extract_invoice(pdf_path: str | Path) -> Invoice:
 
     client = Anthropic()
     response = client.messages.parse(
-        model=MODEL,
+        model=model or MODEL,
         max_tokens=MAX_TOKENS,
         messages=[
             {
