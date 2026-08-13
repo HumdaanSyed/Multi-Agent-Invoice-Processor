@@ -25,7 +25,9 @@ from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
 from invoice_agent import db
+from invoice_agent.extract import MODEL as EXTRACT_MODEL
 from invoice_agent.extract import extract_invoice
+from invoice_agent.tracing import traced_generation
 from invoice_agent.validate import validate_invoice
 
 EXPORT_CSV_PATH = Path(__file__).resolve().parent.parent / "exports" / "invoices.csv"
@@ -75,28 +77,32 @@ def router(state: GraphState) -> dict:
     pdf_b64 = _load_pdf_b64(state["file_path"])
 
     client = Anthropic()
-    response = client.messages.parse(
-        model=ROUTER_MODEL,
-        max_tokens=ROUTER_MAX_TOKENS,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "document",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "application/pdf",
-                            "data": pdf_b64,
+    with traced_generation(
+        "router-classify", model=ROUTER_MODEL, input_data={"file_path": state["file_path"]}
+    ) as gen:
+        response = client.messages.parse(
+            model=ROUTER_MODEL,
+            max_tokens=ROUTER_MAX_TOKENS,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": pdf_b64,
+                            },
                         },
-                    },
-                    {"type": "text", "text": ROUTER_PROMPT},
-                ],
-            }
-        ],
-        output_format=DocumentClassification,
-    )
-    classification = response.parsed_output
+                        {"type": "text", "text": ROUTER_PROMPT},
+                    ],
+                }
+            ],
+            output_format=DocumentClassification,
+        )
+        classification = response.parsed_output
+        gen.record(output=classification.model_dump(), usage=response.usage)
 
     return {
         "doc_type": classification.doc_type,
@@ -106,7 +112,18 @@ def router(state: GraphState) -> dict:
 
 def extractor(state: GraphState) -> dict:
     """Extract structured invoice data via the Phase 1 function."""
-    invoice = extract_invoice(state["file_path"])
+    captured: dict = {}
+    with traced_generation(
+        "extract-invoice", model=EXTRACT_MODEL, input_data={"file_path": state["file_path"]}
+    ) as gen:
+        invoice = extract_invoice(
+            state["file_path"], on_response=lambda response: captured.setdefault("response", response)
+        )
+        response = captured.get("response")
+        gen.record(
+            output=invoice.model_dump(mode="json"),
+            usage=response.usage if response is not None else None,
+        )
     return {
         "invoice": invoice.model_dump(mode="json"),
         "status": "extracted",

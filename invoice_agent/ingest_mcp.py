@@ -41,6 +41,8 @@ from dotenv import load_dotenv
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from invoice_agent.graph import get_graph
+from invoice_agent.tracing import flush as flush_traces
+from invoice_agent.tracing import trace_callbacks
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ATTACHMENTS_DIR = REPO_ROOT / "attachments"
@@ -149,7 +151,7 @@ async def run_ingestion(source: str, limit: int) -> None:
         item_fully_done = True
         for pdf_path in paths:
             thread_id = str(uuid.uuid4())
-            config = {"configurable": {"thread_id": thread_id}}
+            config = {"configurable": {"thread_id": thread_id}, "callbacks": trace_callbacks(thread_id)}
             print(f"  processing {pdf_path} (thread_id={thread_id})")
             try:
                 result = graph.invoke(
@@ -196,6 +198,8 @@ async def run_ingestion(source: str, limit: int) -> None:
                 print(f"  WARNING: mark_processed returned falsy for {item_id!r} - it may be re-listed next run")
         else:
             print(f"  leaving {item_id!r} unprocessed (will be re-listed next run)")
+
+    flush_traces()  # short-lived process - force-send any buffered trace data
 
 
 def main() -> int:

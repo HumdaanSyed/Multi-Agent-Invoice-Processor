@@ -14,6 +14,7 @@ import argparse
 import base64
 import sys
 from pathlib import Path
+from typing import Any, Callable
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
@@ -31,7 +32,11 @@ EXTRACTION_PROMPT = (
 )
 
 
-def extract_invoice(pdf_path: str | Path, model: str | None = None) -> Invoice:
+def extract_invoice(
+    pdf_path: str | Path,
+    model: str | None = None,
+    on_response: Callable[[Any], None] | None = None,
+) -> Invoice:
     """Extract a validated Invoice from a single PDF file.
 
     Args:
@@ -40,6 +45,11 @@ def extract_invoice(pdf_path: str | Path, model: str | None = None) -> Invoice:
             the eval harness (evals/run_eval.py) can score other models
             (e.g. Haiku for cost, Opus for hard scanned docs) without
             duplicating this function - see CLAUDE.md's model-routing note.
+        on_response: Optional callback invoked with the raw parsed API
+            response (before this function returns just `.parsed_output`).
+            Exists so a caller (invoice_agent/graph.py's extractor node) can
+            record token usage for tracing without this function needing to
+            know anything about Langfuse - see invoice_agent/tracing.py.
 
     Returns:
         A validated `Invoice` Pydantic object.
@@ -72,6 +82,8 @@ def extract_invoice(pdf_path: str | Path, model: str | None = None) -> Invoice:
         ],
         output_format=Invoice,
     )
+    if on_response is not None:
+        on_response(response)
     return response.parsed_output
 
 

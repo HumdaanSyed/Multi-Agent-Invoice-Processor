@@ -27,6 +27,8 @@ from langgraph.types import Command
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from invoice_agent.graph import get_graph  # noqa: E402
+from invoice_agent.tracing import flush as flush_traces  # noqa: E402
+from invoice_agent.tracing import trace_callbacks  # noqa: E402
 
 
 def _print_invoice(invoice: dict | None) -> None:
@@ -51,7 +53,7 @@ def main() -> int:
 
     graph = get_graph()
     thread_id = str(uuid.uuid4())
-    config = {"configurable": {"thread_id": thread_id}}
+    config = {"configurable": {"thread_id": thread_id}, "callbacks": trace_callbacks(thread_id)}
     print(f"thread_id: {thread_id}")
 
     initial_state = {
@@ -102,6 +104,7 @@ def main() -> int:
     print()
     _print_invoice(result["invoice"])
 
+    flush_traces()  # short-lived script - force-send any buffered trace data
     return 0
 
 
