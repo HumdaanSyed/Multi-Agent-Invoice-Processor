@@ -76,7 +76,10 @@ def router(state: GraphState) -> dict:
     """Classify the document type via a structured-output Claude call."""
     pdf_b64 = _load_pdf_b64(state["file_path"])
 
-    client = Anthropic()
+    # timeout bounds the FastAPI backend's blocking POST /invoices (Phase 8)
+    # - the SDK's default is 600s with 2 retries, so an unbounded client
+    # here would give one request a ~20min worst case.
+    client = Anthropic(timeout=120.0)
     with traced_generation(
         "router-classify", model=ROUTER_MODEL, input_data={"file_path": state["file_path"]}
     ) as gen:

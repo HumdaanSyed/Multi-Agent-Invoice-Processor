@@ -43,7 +43,15 @@ data/samples/*
 data/inbox/*
 !data/inbox/.gitkeep
 exports/
-docs/
+
+# uploads/ holds user-uploaded invoice PDFs (Phase 8, app/uploads.py) - PII
+# (vendor_name, bill_to), never committed. Swept automatically after 24h.
+uploads/
+
+# docs/ROADMAP.md is the internal build-plan working doc, not a published
+# deliverable - the rest of docs/ (observability.md, mcp_setup.md, api.md)
+# IS committed and referenced by CLAUDE.md/the README.
+docs/ROADMAP.md
 
 # Eval harness - data/eval/*.pdf, evals/dataset.jsonl, and evals/report.md
 # are committed deliverables (synthetic fixtures, no privacy exposure; see
