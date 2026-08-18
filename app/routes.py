@@ -14,6 +14,7 @@ reason not to stay on the event loop.
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 from anthropic import (
@@ -51,6 +52,7 @@ from app.service import DerivedStatus, GraphService, derive_status
 from app.uploads import save_upload, sweep_old_uploads
 
 router = APIRouter()
+logger = logging.getLogger("app.routes")
 
 
 def _service(request: Request) -> GraphService:
@@ -81,13 +83,48 @@ def _current_status(service: GraphService, thread_id: str) -> DerivedStatus:
     return derived
 
 
-def _translate_graph_exception(exc: Exception, thread_id: str) -> ApiError:
+def _failed_node(service: GraphService, thread_id: str) -> str | None:
+    """Best-effort lookup of which node's failure the checkpointer just
+    recorded, for _translate_graph_exception's RuntimeError classification.
+    LangGraph persists a failed task's error before the exception ever
+    reaches the caller (verified in app/service.py's derive_status()
+    docstring), so this is available immediately after a graph.invoke()
+    raises. Returns None if the checkpointer itself can't be read - a
+    diagnostic aid only, must not mask the real exception being handled."""
+    try:
+        derived = derive_status(service.get_snapshot(thread_id))
+    except Exception:  # noqa: BLE001 - diagnostic aid only, never the primary error path
+        return None
+    return derived.failed_at_node if derived is not None else None
+
+
+def _translate_graph_exception(exc: Exception, thread_id: str, *, failed_node: str | None) -> ApiError:
     """Map an exception raised out of graph.invoke() to the API's error
-    hierarchy. Anthropic exceptions propagate raw - neither router() nor
-    extract_invoice() catches anything. A Supabase/Storage failure inside
-    output() surfaces as a RuntimeError whose message embeds vendor_name,
-    invoice_number, and a storage path - rich detail for the server log,
-    never for the response body (see app/errors.py's module docstring)."""
+    hierarchy, logging the original exception first.
+
+    RunResponse's docstring (app/models.py) promises "full detail goes to
+    the server log, keyed by thread_id" for a failed run - this is where
+    that actually happens. Every ApiError subclass's own handler in
+    app/errors.py deliberately does NOT log (translating an error there
+    doesn't know yet whether it's worth a log line at all - a 404 or a 422
+    isn't); this is the one place a *graph* failure is turned into a safe,
+    generic response, so it's the right place to keep the real exception
+    (with its `__cause__`/traceback, and everything output()'s RuntimeError
+    embeds - vendor_name, invoice_number, storage path) somewhere an
+    operator can actually find it, rather than only in the checkpointer's
+    `tasks[].error` column.
+
+    `failed_node` disambiguates a genuine output() persistence failure from
+    a RuntimeError raised earlier in the graph - both look identical by
+    type alone. Concretely: validator() calls db.is_duplicate ->
+    db.get_client(), which raises a plain RuntimeError if Supabase isn't
+    configured - and that happens before output() ever runs. Anthropic
+    exceptions propagate raw (neither router() nor extract_invoice()
+    catches anything), so those are matched by type below; only the
+    RuntimeError case needs this extra check.
+    """
+    logger.exception("Graph run failed (thread_id=%s, failed_node=%s)", thread_id, failed_node)
+
     if isinstance(exc, RateLimitError):
         retry_after = None
         try:
@@ -109,7 +146,7 @@ def _translate_graph_exception(exc: Exception, thread_id: str) -> ApiError:
         return UpstreamUnavailable(
             "The extraction service is temporarily unavailable - try again shortly.", thread_id=thread_id
         )
-    if isinstance(exc, RuntimeError):
+    if isinstance(exc, RuntimeError) and failed_node == "output":
         return PersistenceFailed("Saving the processed invoice failed.", thread_id=thread_id)
     return RunFailed("An unexpected error occurred while processing this run.", thread_id=thread_id)
 
@@ -128,7 +165,7 @@ def create_invoice_run(request: Request, file: UploadFile = File(...)) -> RunRes
     except ApiError:
         raise
     except Exception as exc:  # noqa: BLE001 - translate every graph failure into the API's shape
-        raise _translate_graph_exception(exc, thread_id) from exc
+        raise _translate_graph_exception(exc, thread_id, failed_node=_failed_node(service, thread_id)) from exc
 
     return _to_run_response(thread_id, _current_status(service, thread_id))
 
@@ -151,7 +188,7 @@ def resume_invoice_run(thread_id: str, body: ResumeRequest, request: Request) ->
     except ApiError:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise _translate_graph_exception(exc, thread_id) from exc
+        raise _translate_graph_exception(exc, thread_id, failed_node=_failed_node(service, thread_id)) from exc
 
     return _to_run_response(thread_id, _current_status(service, thread_id))
 

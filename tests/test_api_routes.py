@@ -195,6 +195,52 @@ def test_output_failure_reports_failed_and_empty_resume_retries(monkeypatch):
         assert response.json()["status"] == "completed"
 
 
+# --- error translation ---------------------------------------------------
+
+
+def test_runtime_error_before_output_is_not_misreported_as_persistence_failed(client, monkeypatch):
+    """validator() calls db.is_duplicate -> db.get_client(), which raises a
+    plain RuntimeError if Supabase isn't configured - simulated here
+    directly. This must NOT be mislabeled persistence_failed (that's
+    output()-specific and means "we tried and failed to save"); nothing
+    was ever attempted here."""
+
+    def broken_is_duplicate(vendor, number):
+        raise RuntimeError("SUPABASE_URL / SUPABASE_KEY are not set.")
+
+    monkeypatch.setattr(db, "is_duplicate", broken_is_duplicate)
+
+    response = _upload(client)
+    assert response.status_code == 500
+    body = response.json()
+    assert body["error"] == "internal_error"
+    thread_id = body["thread_id"]
+
+    # GET reveals the true failing node either way.
+    response = client.get(f"/invoices/{thread_id}")
+    assert response.json()["status"] == "failed"
+    assert response.json()["failed_at_node"] == "validator"
+
+
+def test_graph_failure_is_logged_with_thread_id(client, monkeypatch, caplog):
+    """RunResponse's docstring promises 'full detail goes to the server
+    log, keyed by thread_id' for a failed run - confirm that's real, not
+    just documented."""
+    import logging
+
+    def broken_is_duplicate(vendor, number):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(db, "is_duplicate", broken_is_duplicate)
+
+    with caplog.at_level(logging.ERROR, logger="app.routes"):
+        response = _upload(client)
+
+    thread_id = response.json()["thread_id"]
+    assert any(thread_id in record.getMessage() for record in caplog.records)
+    assert any("boom" in record.getMessage() or record.exc_text for record in caplog.records)
+
+
 # --- uploads -----------------------------------------------------------
 
 
