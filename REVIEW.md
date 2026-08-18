@@ -190,6 +190,40 @@ instance of any of these as high-confidence, not merely plausible:
   fulfill it. Fixed with `logger.exception(...)` at the translation point.
   When reviewing an error-sanitization boundary, check that hiding detail
   from the client didn't also silently drop it from the server.
+- **A script's own filename shadowing a same-named top-level package.**
+  `frontend/app.py` broke every `from app.models import ...` inside
+  `frontend/api_client.py` (Phase 9), because Streamlit's script runner
+  prepends the *executed script's own directory* to `sys.path` before
+  running it — so a bare `import app`, triggered from anywhere in the
+  import chain, resolved to `frontend/app.py` itself instead of the
+  top-level `app/` package, both sharing the name "app". The first fix
+  attempt (`if str(REPO_ROOT) not in sys.path: sys.path.insert(0, ...)`)
+  didn't work either: `REPO_ROOT` was already in `sys.path` via the
+  editable install's `.pth` file, just at a lower-priority *position* than
+  where the script runner had just inserted `frontend/` — so the "already
+  present" guard skipped the insert, and `frontend/` kept winning the
+  search. The real fix removes-then-reinserts to guarantee position 0, not
+  just presence. General lesson, not just for this exact collision: when a
+  framework mutates `sys.path` (or any ordered search path) ahead of your
+  own code, checking *membership* is not the same as checking *priority* —
+  and a same-named file/package one directory below another is always a
+  candidate for this class of shadow, independent of Streamlit.
+- **A keyed UI widget shown again with different underlying data, under
+  the same fixed key.** Streamlit (and similar immediate-mode UI
+  frameworks) only honors a widget's `value=` argument the first render its
+  `key` exists in session state; every later render, session state wins
+  and `value=` is silently ignored. `frontend/app.py`'s `needs_review`
+  screen can legitimately re-render with a *different* invoice after a
+  resume that only partially fixed the flags (the human_review -> validator
+  edge is unconditional, so a partial fix re-interrupts with the edited
+  data) — a fixed `key="total"` would have kept showing the pre-edit value
+  on the second render. Fixed with a nonce namespacing every widget key,
+  bumped whenever a new run result is stored (`wkey()`/`form_nonce` in
+  `frontend/app.py`). Verified live: editing one field of a two-flag
+  invoice and resubmitting correctly showed the edited value, not a stale
+  one, on the re-interrupt. Any screen that can be re-shown with new data
+  through the same code path — not just a page navigation — is a candidate
+  for this if its widgets use static keys.
 
 ## Known intentional patterns — do not re-flag
 
