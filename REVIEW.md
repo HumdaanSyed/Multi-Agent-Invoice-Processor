@@ -161,6 +161,35 @@ instance of any of these as high-confidence, not merely plausible:
   one — but worth a check whenever a diff adds a new caller of an
   identifier that already has an established uniqueness contract for one
   purpose.
+- **Exception classification by type alone, ignoring which call site
+  raised it.** An error-translation layer maps one exception type (e.g.
+  `RuntimeError`) to one user-facing category via `isinstance()`, but the
+  same type is raised by multiple, semantically different call sites
+  deeper in the stack. Bit us in `app/routes.py`'s
+  `_translate_graph_exception` (Phase 8 ultrareview): `output()`'s
+  Supabase/Storage failures and `db.get_client()`'s missing-config failure
+  (reached from `validator()` via `db.is_duplicate`) are both a plain
+  `RuntimeError`, but only the former means "we tried and failed to
+  save" — the classifier mapped both to `persistence_failed`, reporting a
+  config problem as if a save had been attempted. Fixed by checking which
+  node's task actually recorded the error (`derive_status()`'s
+  `failed_at_node`, already computed for the API's own status field)
+  before trusting the exception's type alone. Any classifier built on
+  `isinstance()` over a broad exception type is a candidate — ask whether
+  every call site that can raise that type actually means the same thing.
+- **A sanitized outward-facing error response with no server-side log of
+  the real exception.** Returning a safe, generic message to the client is
+  correct when it deliberately avoids leaking PII/internal detail (see the
+  Security/PII priority above) — but only if the real exception is
+  captured somewhere an operator can actually find it. `app/errors.py`'s
+  per-`ApiError`-subclass handler didn't log at all; the only durable
+  trace of a failure was the checkpointer's `tasks[].error` column, one
+  SQL query away from useless in practice. `RunResponse`'s own docstring
+  already promised "full detail goes to the server log, keyed by
+  thread_id" — a promise nothing was checking against the code meant to
+  fulfill it. Fixed with `logger.exception(...)` at the translation point.
+  When reviewing an error-sanitization boundary, check that hiding detail
+  from the client didn't also silently drop it from the server.
 
 ## Known intentional patterns — do not re-flag
 

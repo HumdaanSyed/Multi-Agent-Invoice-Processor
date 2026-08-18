@@ -546,6 +546,7 @@ dependencies = [
     { name = "mcp" },
     { name = "pydantic" },
     { name = "python-dotenv" },
+    { name = "python-multipart" },
     { name = "streamlit" },
     { name = "supabase" },
     { name = "uvicorn" },
@@ -553,6 +554,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "httpx" },
     { name = "pytest" },
 ]
 
@@ -569,13 +571,17 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.29.0" },
     { name = "pydantic", specifier = ">=2.9.0" },
     { name = "python-dotenv", specifier = ">=1.0.1" },
+    { name = "python-multipart", specifier = ">=0.0.32" },
     { name = "streamlit", specifier = ">=1.40.0" },
     { name = "supabase", specifier = ">=2.10.0" },
     { name = "uvicorn", specifier = ">=0.32.0" },
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8.3.0" }]
+dev = [
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "pytest", specifier = ">=8.3.0" },
+]
 
 [[package]]
 name = "itsdangerous"

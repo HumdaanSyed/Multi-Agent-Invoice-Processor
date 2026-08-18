@@ -60,7 +60,10 @@ def extract_invoice(
 
     pdf_b64 = base64.standard_b64encode(pdf_path.read_bytes()).decode("utf-8")
 
-    client = Anthropic()
+    # timeout bounds the FastAPI backend's blocking POST /invoices (Phase 8)
+    # - the SDK's default is 600s with 2 retries, so an unbounded client
+    # here would give one request a ~20min worst case.
+    client = Anthropic(timeout=120.0)
     response = client.messages.parse(
         model=model or MODEL,
         max_tokens=MAX_TOKENS,

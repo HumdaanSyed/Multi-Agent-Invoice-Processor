@@ -47,7 +47,7 @@ Every `graph.invoke()` is traced via `invoice_agent/tracing.py` (optional — no
 - `docker compose up` — run full stack in containers
 
 ## Current Phase
-Phase 8: FastAPI backend
+Phase 9: Frontend demo (Streamlit)
 
 ## Roadmap
 The full 11-phase build plan lives in `docs/ROADMAP.md` (not auto-loaded here, it's long). At the start of a session working on a new phase, say: "Read docs/ROADMAP.md, we're on Phase 8, implement it."
