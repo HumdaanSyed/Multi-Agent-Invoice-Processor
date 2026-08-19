@@ -319,6 +319,23 @@ instance of any of these as high-confidence, not merely plausible:
   bugs at this layer don't show up in `docker compose build` or `uv run
   pytest`, only in an actual container boot against a fresh volume.
 
+- **Dockerfile syntax that's valid on local `docker`/Buildx but rejected
+  by a hosted platform's own builder.** `docker/dockerfile:1`'s
+  `RUN --mount=type=cache,target=...` is valid with no `id=` on standard
+  BuildKit (it infers one from the target path) — Railway's builder
+  ("Metal") rejects it outright: `dockerfile invalid: flag
+  '--mount=type=cache,target=/root/.cache/uv' is missing an id argument`.
+  Bit us in `Dockerfile` (Phase 10 review): both `uv sync` cache-mount
+  `RUN` lines built and ran fine in every local/CI verification pass, then
+  failed on the very first real Railway deploy. Fixed by adding an
+  explicit `id=uv-cache` (valid on both builders). Local `docker build`/
+  `docker compose build`/a GitHub Actions Buildx job all share the same
+  underlying BuildKit, so passing all three does not establish a
+  Dockerfile is portable to a *different* builder implementation — a
+  platform-specific builder (Railway, Google Cloud Build, etc.) is only
+  actually verified by a real deploy through it, and that step can't be
+  skipped just because every other builder accepted the same file.
+
 ## Known intentional patterns — do not re-flag
 
 - `exports/invoices.csv` is an **append-only audit log**, not deduplicated

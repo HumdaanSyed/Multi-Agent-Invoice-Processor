@@ -27,8 +27,12 @@ ENV UV_COMPILE_BYTECODE=1 \
 # code edit. --locked (not a plain sync) fails the build if the lockfile
 # is stale instead of silently re-resolving - the same reproducibility
 # guarantee `uv sync --locked` gives locally.
+# Explicit `id=uv-cache` on the cache mount: standard docker/buildx infers
+# an id from the target path when one isn't given, but Railway's builder
+# rejects an id-less cache mount outright ("missing an id argument") -
+# the explicit id works on both.
 COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv,id=uv-cache \
     uv sync --locked --no-install-project --no-dev
 
 # Now the source. uv_build's module-root="" (pyproject.toml) discovers
@@ -37,7 +41,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # through, not just app/invoice_agent/frontend. The runtime stage below is
 # what actually trims the image down.
 COPY . .
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv,id=uv-cache \
     uv sync --locked --no-dev
 
 # --- runtime -----------------------------------------------------------
