@@ -5,7 +5,11 @@ running the image `.github/workflows/docker-build.yml` publishes to GHCR —
 Railway can also build the `Dockerfile` itself if you'd rather not wait on
 CI, but pulling the pre-built image is faster and matches what
 `deploy/ec2.md` does too, so a change to the app behaves identically on
-both targets.
+both targets. (If you do build directly on Railway: `Dockerfile`
+deliberately has no BuildKit cache mounts — Railway's builder requires
+their id hardcoded per-service, which doesn't work for one Dockerfile
+shared across two services, so builds there are correct but slower than
+they'd be with a cache. See `REVIEW.md` for the full story.)
 
 ## Why Railway over building this by hand
 
