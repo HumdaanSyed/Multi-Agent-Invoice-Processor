@@ -255,6 +255,69 @@ instance of any of these as high-confidence, not merely plausible:
   to ask, separately, "what happens if the call *succeeds* with a body
   that doesn't parse or doesn't validate" — that path needs the same
   wrapping, not just the non-2xx path.
+- **Baked-in image metadata surviving a runtime command override.**
+  Docker's `HEALTHCHECK` (also `ENTRYPOINT`, labels) is set once at image
+  build time and applies to *every* container run from that image,
+  regardless of a `docker run`/Compose `command:` override — only a
+  matching `docker run --health-cmd` or Compose `healthcheck:` block
+  actually replaces it. Bit us in `Dockerfile` (Phase 10 review):
+  `docker-compose.yml`'s `frontend` service overrode `command:` to run
+  Streamlit on 8501 but inherited the backend-oriented `HEALTHCHECK CMD
+  curl localhost:8000/health` unchanged, so the container ran correctly
+  but reported `unhealthy` forever — confirmed live via `docker inspect`'s
+  health log. Fixed with an explicit `healthcheck:` override in every
+  compose file/service that changes what the container actually serves.
+  Any multi-purpose image (one `Dockerfile`, several `command:` overrides
+  for different services) is a candidate — check that anything baked into
+  image metadata besides the entrypoint got a matching per-service
+  override, not just the command.
+- **A deploy/setup doc's claim not matching what its own steps actually
+  do.** `deploy/README.md` (Phase 10 review) asserted "one shared image,"
+  but `docker-compose.yml` gave `backend`/`frontend` independent `build:
+  .` blocks with no shared `image:` tag, so Compose silently built two
+  full images — reproduced live via `docker compose build` showing two
+  separately-tagged ~945MB images. Separately, `deploy/railway.md`'s intro
+  claimed both services "pull the pre-built GHCR image," but its own
+  numbered steps said "Deploy from GitHub repo" (Railway builds from
+  source), directly contradicting the doc's stated premise. Both were
+  design claims nobody had checked against the actual config/steps below
+  them. Any doc that asserts a design property ("one image," "uses the
+  pre-built artifact," "no state is lost") is a candidate for verification
+  against the literal config it describes, not just a read-through for
+  plausibility.
+- **A markdown inline code span line-wrapped across two source lines.**
+  CommonMark/GFM collapses a newline inside a backtick code span to a
+  single space in the rendered output. `deploy/railway.md` (Phase 10
+  review) wrote `` `CHECKPOINT_DB_PATH=/data/\n     checkpoints/graph.sqlite` ``
+  across a line wrap for readability — GitHub renders (and a reader
+  copy-pastes) `CHECKPOINT_DB_PATH=/data/ checkpoints/graph.sqlite`, a
+  broken value with an injected space, defeating the exact setup step it
+  was part of. Any doc with a long inline-code value (a path, a command, a
+  URL) wrapped for line length is a candidate — keep values that will be
+  copy-pasted verbatim on one physical line, even if that line runs long.
+
+- **`chown -R` on a parent directory assumed to substitute for `mkdir` on
+  a child that a volume will later mount over.** Docker only auto-creates
+  a missing volume-mount-point directory *as root* if the image doesn't
+  already have that path — copying an existing directory's ownership into
+  a fresh named volume on first mount only happens when the directory
+  already exists in the image at build time. Bit us fixing the very
+  previous finding in this file (Phase 10 review, self-inflicted): the
+  original `Dockerfile` had `mkdir -p checkpoints uploads exports && chown
+  -R app:app checkpoints uploads exports`; replacing it with just `chown
+  -R app:app /app` (to generalize beyond three hardcoded names) silently
+  dropped the `mkdir`, so `checkpoints/`/`uploads/`/`exports/` no longer
+  existed in the image for `chown` to act on — `docker compose up` then
+  auto-created them as root-owned mount points and the non-root backend
+  crashed with `sqlite3.OperationalError: unable to open database file`.
+  Caught only by actually running `docker compose up` against fresh
+  volumes, not by reading the Dockerfile. Any edit that generalizes a
+  `mkdir && chown` pair into a broader `chown -R` needs to keep (or
+  re-verify) the `mkdir` for every specific path something else — a
+  volume mount, a bind mount — will later target, and needs a real
+  `docker compose up` from clean state to catch a dropped one; ownership
+  bugs at this layer don't show up in `docker compose build` or `uv run
+  pytest`, only in an actual container boot against a fresh volume.
 
 ## Known intentional patterns — do not re-flag
 
