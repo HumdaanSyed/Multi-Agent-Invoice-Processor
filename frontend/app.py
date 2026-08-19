@@ -112,6 +112,10 @@ def set_run(run) -> None:
     st.session_state.active_run = run
     st.session_state.run_error = None
     st.session_state.form_nonce += 1
+    # Invalidate the sidebar's cached run list so whatever just happened
+    # (a new upload, a resume, a retry) shows up immediately instead of
+    # waiting out the cache TTL below.
+    _cached_list_runs.clear()
 
 
 def set_error(thread_id: Optional[str], err: BackendError) -> None:
@@ -139,6 +143,26 @@ def _safe_list_runs(limit: int = 20) -> list:
         return []
 
 
+# render_sidebar() runs on EVERY script rerun (any widget interaction
+# anywhere on the page, not just sidebar ones) - cache both backend calls
+# it makes for a few seconds so an unrelated click doesn't cost 2 extra
+# HTTP round-trips. Neither `readiness()` nor `_safe_list_runs()` (a
+# failure returns `[]`, not an exception) get cached forever: st.cache_data
+# doesn't cache a call that raises, and `set_run()` explicitly clears the
+# list-runs cache so a just-completed action is never hidden by staleness.
+_SIDEBAR_CACHE_TTL = 5  # seconds
+
+
+@st.cache_data(ttl=_SIDEBAR_CACHE_TTL, show_spinner=False)
+def _cached_readiness():
+    return readiness()
+
+
+@st.cache_data(ttl=_SIDEBAR_CACHE_TTL, show_spinner=False)
+def _cached_list_runs(limit: int = 10) -> list:
+    return _safe_list_runs(limit=limit)
+
+
 # --- sidebar -------------------------------------------------------------
 
 
@@ -159,7 +183,7 @@ def render_sidebar() -> None:
         st.divider()
         st.subheader("Recent runs")
         st.caption("From the run checkpointer, not Supabase - includes flagged and failed runs too.")
-        runs = _safe_list_runs(limit=10)
+        runs = _cached_list_runs(limit=10)
         if not runs:
             st.caption("No runs yet.")
         for summary in runs:
@@ -174,14 +198,20 @@ def render_sidebar() -> None:
 
 def _render_readiness_chip() -> None:
     try:
-        result = readiness()
+        result = _cached_readiness()
     except BackendError:
         st.error(f"Backend unreachable ({backend_url()})")
         return
     if result.status == "ok":
         st.success("Backend ready")
     else:
-        missing = [name for name, check in result.checks.items() if not check.configured]
+        # "langfuse" is deliberately excluded: app/health.py's own
+        # _REQUIRED_CHECKS never gates `status` on it (tracing is
+        # optional), so listing it here would blame an unconfigured-by-
+        # design service for a degraded status it had nothing to do with.
+        missing = [
+            name for name, check in result.checks.items() if not check.configured and name != "langfuse"
+        ]
         st.warning(f"Backend degraded: {', '.join(missing) or 'unknown'}")
 
 
@@ -233,29 +263,24 @@ def render_upload() -> None:
 
 
 def _submit_upload(marker: str, filename: str, pdf_bytes: bytes) -> None:
-    # Recorded before the call so a client-side timeout can be recovered
-    # from by diffing, not by polling a thread_id we may never receive -
-    # POST /invoices mints its thread_id server-side and only returns it
-    # in the response body, which a timeout means we never got.
-    known_before = {r.thread_id for r in _safe_list_runs()}
-
+    # A client-side timeout (POST /invoices mints its thread_id server-side
+    # and only returns it in the response body, which a timeout means we
+    # never got) is deliberately NOT auto-recovered by diffing GET
+    # /invoices before/after: on a shared deployment, a second upload
+    # (another tab, another visitor) completing in the same window would
+    # make that diff resolve to exactly one new thread_id that isn't this
+    # user's own, silently showing someone else's extracted invoice (PII).
+    # render_error()'s client_timeout branch already tells the user to
+    # check "Recent runs" themselves instead - slower, but correct.
+    #
+    # processed_file_id is likewise only set on success: marking a file
+    # "processed" after a failed attempt (transient or not) would block
+    # the user from simply retrying the same file without an unrelated
+    # workaround ("New invoice" or picking a different file).
     with st.spinner(f"Extracting {filename}… this can take a while for a large/scanned PDF."):
         try:
             run = create_run(pdf_bytes, filename)
         except BackendError as err:
-            st.session_state.processed_file_id = marker
-            if err.code == "client_timeout":
-                new_ids = {r.thread_id for r in _safe_list_runs()} - known_before
-                if len(new_ids) == 1:
-                    recovered_thread_id = next(iter(new_ids))
-                    try:
-                        run = get_run(recovered_thread_id)
-                    except BackendError:
-                        set_error(None, err)
-                    else:
-                        set_run(run)
-                    st.rerun()
-                    return
             set_error(None, err)
         else:
             st.session_state.processed_file_id = marker
@@ -303,7 +328,11 @@ def _date_field(label: str, value: Optional[str], key: str, *, optional: bool = 
     and `st.date_input` cannot accept a non-date string at all. Returns
     an ISO date string (or None), ready for `build_corrections()`."""
     parsed = parse_iso_date(value)
-    if parsed is not None or (optional and value is None):
+    if parsed is not None or (optional and not value):
+        # `not value` (not `value is None`) so an empty string is treated
+        # the same as a missing value - some extraction/edit paths can
+        # legitimately produce "" instead of null for an unset optional
+        # field, and that's not a validation error to show the user.
         widget_value = st.date_input(label, value=parsed, key=key)
         return widget_value.isoformat() if widget_value else None
     text_value = st.text_input(f"{label} (not a recognized date – please fix)", value=value or "", key=key)
@@ -356,6 +385,22 @@ def render_needs_review(run) -> None:
         submitted = st.form_submit_button("Save corrections & continue", type="primary")
 
     if not submitted:
+        return
+
+    # Invoice/InvoiceCorrections type these as plain `str` with no
+    # min_length, and nothing downstream (the merge/validate step,
+    # validate_invoice()'s business rules, db.insert_invoice) rejects an
+    # empty string either - unlike line_items just below, these need their
+    # own check here or a blanked required field would persist to Supabase.
+    required_fields = {
+        "Invoice number": invoice_number,
+        "Vendor": vendor_name,
+        "Bill to": bill_to,
+        "Currency": currency,
+    }
+    blank = [label for label, value in required_fields.items() if not value.strip()]
+    if blank:
+        st.error(f"{', '.join(blank)} cannot be blank.")
         return
 
     try:
@@ -465,7 +510,10 @@ _ERROR_COPY = {
 
 # Slugs where a checkpoint may actually exist - i.e. the graph started
 # running before the failure. Upload-validation errors (bad file, too
-# large, empty) never mint a thread_id worth checking on.
+# large, empty) never mint a thread_id worth checking on. thread_busy is
+# included even though it isn't a graph *failure* - a concurrent-lock
+# conflict is the single most likely-to-self-resolve case, and ThreadBusy
+# always carries the thread_id of a real, existing checkpoint.
 _RECOVERABLE_CODES = {
     "internal_error",
     "persistence_failed",
@@ -473,6 +521,8 @@ _RECOVERABLE_CODES = {
     "upstream_misconfigured",
     "upstream_rate_limited",
     "pdf_unprocessable",
+    "service_not_configured",
+    "thread_busy",
 }
 
 
@@ -486,7 +536,10 @@ def render_error(err: dict) -> None:
     if err["code"] == "client_timeout":
         st.caption("Check “Recent runs” in the sidebar — the upload may have completed anyway.")
         return
-    if err.get("retry_after"):
+    if err.get("retry_after") is not None:
+        # Not `if err.get("retry_after"):` - retry_after=0 ("retry
+        # immediately") is a legitimate value and must not be treated the
+        # same as "not provided" just because 0 is falsy.
         st.caption(f"Retry after {err['retry_after']}s.")
 
     thread_id = err.get("thread_id")

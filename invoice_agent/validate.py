@@ -26,7 +26,13 @@ class ValidationResult(BaseModel):
     needs_review: bool
 
 
-def _parse_date(value: str | None) -> date | None:
+def parse_iso_date(value: str | None) -> date | None:
+    """Best-effort ISO 8601 (YYYY-MM-DD) parse - `None` for an empty/missing
+    value or a non-ISO string alike, never raises. Public (not prefixed
+    `_parse_date`) because `frontend/forms.py` reuses this exact parser
+    rather than hand-duplicating it - the frontend needs to know the same
+    thing this module does about whether a date is genuinely ISO before
+    deciding how to render/re-submit it."""
     if not value:
         return None
     try:
@@ -68,13 +74,13 @@ def validate_invoice(
             f"Subtotal + tax = {expected_total:.2f} but total is {inv.total:.2f}"
         )
 
-    invoice_date = _parse_date(inv.invoice_date)
+    invoice_date = parse_iso_date(inv.invoice_date)
     if invoice_date is None:
         flags.append(f"invoice_date '{inv.invoice_date}' is not a valid ISO 8601 date")
 
     due_date = None
     if inv.due_date is not None:
-        due_date = _parse_date(inv.due_date)
+        due_date = parse_iso_date(inv.due_date)
         if due_date is None:
             flags.append(f"due_date '{inv.due_date}' is not a valid ISO 8601 date")
 

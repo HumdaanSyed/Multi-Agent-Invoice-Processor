@@ -35,14 +35,17 @@ until the run interrupts or completes, so the response already carries the
 terminal/interrupted state. A spinner around one blocking call is the
 actual UX.
 
-The one place polling-shaped logic survives is recovering from a client-
-side timeout: `POST /invoices` mints its `thread_id` server-side and only
-returns it in the response body, so a timeout means the client never
-learns it. Rather than a `time.sleep` loop (which would freeze the whole
-Streamlit session and can't be cancelled), `_submit_upload()` snapshots
-`GET /invoices`' thread list before the call and diffs it after a timeout —
-the one new thread_id that appears is the run that timed out, and it's
-loaded directly.
+A client-side timeout is a real gap in this design, not a solved one:
+`POST /invoices` mints its `thread_id` server-side and only returns it in
+the response body, so a timeout means the client never learns it. An
+earlier version tried to recover by diffing `GET /invoices`' thread list
+before/after the timeout and auto-loading whichever single new thread_id
+appeared — removed after review, because on a shared deployment a second
+upload completing in that same window (another tab, another visitor) makes
+the diff land on someone *else's* thread, silently showing their extracted
+invoice (vendor, totals, bill_to — PII) to the wrong user. `render_error()`
+now just tells the user to check "Recent runs" in the sidebar themselves —
+slower, but it can't misattribute another user's data.
 
 ## Why the sidebar reads the checkpointer, not Supabase
 
@@ -113,3 +116,9 @@ bug — correct the invoice number to move past it.
   well-contained fix, not something later code needs to think about.
 - **No auth, no rate limiting** — matches the backend's own posture
   (`docs/api.md`); this is a demo, not a hardened deployment.
+- **The sidebar's readiness/recent-runs data is cached for 5s** (via
+  `st.cache_data`) since `render_sidebar()` otherwise runs, and hits the
+  backend, on every rerun triggered by any widget on the page. Explicitly
+  invalidated whenever `set_run()` stores a new result, so an action you
+  just took always shows immediately — the 5s window only affects an
+  *unrelated* action happening elsewhere in that same span.

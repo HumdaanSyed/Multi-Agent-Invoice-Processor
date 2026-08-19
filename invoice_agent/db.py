@@ -127,6 +127,23 @@ def upload_pdf(path: str | Path) -> str:
     return storage_path
 
 
+def invoice_csv_rows(invoice: dict) -> list[dict]:
+    """One CSV row dict per line item, keyed by `CSV_FIELDS` - the shared
+    row-assembly logic behind both `export_invoice_csv` below (the
+    server-side running audit log) and the frontend's per-invoice CSV
+    download (`frontend/forms.py`'s `invoice_to_csv_bytes`), so the two
+    outputs can't silently diverge in row shape. `line_items or [{}]` so a
+    zero-line-item invoice still emits one row."""
+    header_values = {field: invoice.get(field) for field in _HEADER_FIELDS}
+    line_items = invoice.get("line_items") or [{}]
+    rows = []
+    for item in line_items:
+        row = dict(header_values)
+        row.update({f"line_item_{field}": item.get(field) for field in _LINE_ITEM_FIELDS})
+        rows.append(row)
+    return rows
+
+
 def export_invoice_csv(invoice: dict, out_path: str | Path) -> None:
     """Append one CSV row per line item for this invoice to `out_path`.
 
@@ -137,17 +154,9 @@ def export_invoice_csv(invoice: dict, out_path: str | Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not out_path.exists()
 
-    header_values = {field: invoice.get(field) for field in _HEADER_FIELDS}
-
     with open(out_path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         if write_header:
             writer.writeheader()
-
-        line_items = invoice.get("line_items") or [{}]
-        for item in line_items:
-            row = dict(header_values)
-            row.update(
-                {f"line_item_{field}": item.get(field) for field in _LINE_ITEM_FIELDS}
-            )
+        for row in invoice_csv_rows(invoice):
             writer.writerow(row)

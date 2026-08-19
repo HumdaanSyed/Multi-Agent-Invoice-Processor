@@ -224,6 +224,37 @@ instance of any of these as high-confidence, not merely plausible:
   one, on the re-interrupt. Any screen that can be re-shown with new data
   through the same code path — not just a page navigation — is a candidate
   for this if its widgets use static keys.
+- **A client-side "exactly one new item appeared, so it must be mine"
+  recovery heuristic.** `frontend/app.py`'s upload-timeout recovery
+  (Phase 9 ultrareview) diffed `GET /invoices`' thread list before/after a
+  client-side timeout and auto-loaded whichever single new `thread_id`
+  appeared, on the assumption that a lost server-side `thread_id` could be
+  safely re-identified this way. It can't: on any deployment with more
+  than one concurrent user, a *different* upload completing in the same
+  window makes the diff land on someone else's thread — the fix removed
+  the auto-load entirely rather than trying to disambiguate further (there
+  was nothing to disambiguate *with* — no client-supplied token, no
+  filename match, nothing). Any "correlate my lost request with a list of
+  server-side state by elimination" mechanism is a candidate for this —
+  count-based or set-difference-based matching is only safe when the
+  system is provably single-tenant at that moment, which a shared demo
+  deployment isn't.
+- **A "success" response body trusted without validation.** Every
+  `api_client.py` function that parses a 2xx (or an explicitly-handled
+  non-2xx like `readiness()`'s 200/503) response body called
+  `response.json()` and `Model.model_validate(data)` with no try/except,
+  while every caller only caught the library's own `BackendError` (Phase 9
+  ultrareview, independently surfaced by three separate review angles - a
+  strong signal this shape is easy to miss). A non-JSON body or a body
+  that doesn't match the target Pydantic schema — both realistic on a
+  version-skewed backend/frontend pair, or a proxy returning an
+  unexpected-but-200 error page — raised an uncaught `ValueError`/
+  `pydantic.ValidationError` that crashed the whole request instead of
+  going through the library's own designed error path. Any HTTP client
+  wrapper that defines a custom exception type for "the call failed" needs
+  to ask, separately, "what happens if the call *succeeds* with a body
+  that doesn't parse or doesn't validate" — that path needs the same
+  wrapping, not just the non-2xx path.
 
 ## Known intentional patterns — do not re-flag
 

@@ -204,3 +204,61 @@ def test_connection_error_maps_to_backend_unreachable():
             get_run("t1")
     assert excinfo.value.code == "backend_unreachable"
     assert "127.0.0.1:8000" in excinfo.value.message
+
+
+def test_connect_timeout_maps_to_backend_unreachable_not_client_timeout():
+    """ConnectTimeout subclasses BOTH Timeout and ConnectionError - it means
+    the backend was never reachable at all (not just slow), so it must be
+    classified as backend_unreachable, not client_timeout."""
+    import requests
+
+    with patch("requests.request", side_effect=requests.exceptions.ConnectTimeout("refused")):
+        with pytest.raises(BackendError) as excinfo:
+            get_run("t1")
+    assert excinfo.value.code == "backend_unreachable"
+
+
+def test_missing_schema_error_maps_to_backend_unreachable():
+    """A malformed BACKEND_URL (e.g. missing "http://") raises MissingSchema
+    - a RequestException that's neither Timeout nor ConnectionError - and
+    must still become a BackendError, not propagate raw."""
+    import requests
+
+    with patch("requests.request", side_effect=requests.exceptions.MissingSchema("no scheme")):
+        with pytest.raises(BackendError) as excinfo:
+            get_run("t1")
+    assert excinfo.value.code == "backend_unreachable"
+
+
+def test_success_status_with_non_json_body_raises_backend_error():
+    """A 2xx response whose body isn't valid JSON must not crash the
+    caller with an unhandled JSONDecodeError."""
+    with patch("requests.request", return_value=_FakeResponse(200, json_raises=True)):
+        with pytest.raises(BackendError) as excinfo:
+            get_run("t1")
+    assert excinfo.value.code == "upstream_unavailable"
+
+
+def test_success_status_with_schema_mismatched_body_raises_backend_error():
+    """A 2xx response whose body is valid JSON but doesn't satisfy
+    RunResponse's schema (e.g. a version-skewed backend) must not crash the
+    caller with an unhandled pydantic.ValidationError."""
+    with patch("requests.request", return_value=_FakeResponse(200, {"unexpected": "shape"})):
+        with pytest.raises(BackendError) as excinfo:
+            get_run("t1")
+    assert excinfo.value.code == "upstream_unavailable"
+
+
+def test_readiness_200_with_non_json_body_raises_backend_error():
+    """readiness() bypasses _request()'s auto-raise for 200/503, so its
+    own JSON decode needs the same guard - covered separately from the
+    generic _request() path above."""
+    with patch("requests.request", return_value=_FakeResponse(200, json_raises=True)):
+        with pytest.raises(BackendError):
+            readiness()
+
+
+def test_readiness_200_with_schema_mismatched_body_raises_backend_error():
+    with patch("requests.request", return_value=_FakeResponse(200, {"unexpected": "shape"})):
+        with pytest.raises(BackendError):
+            readiness()

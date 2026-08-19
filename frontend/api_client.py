@@ -16,11 +16,14 @@ talks to the backend over HTTP only (see `docs/frontend.md`).
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from typing import Any, Optional, TypeVar
 
 import requests
+from pydantic import BaseModel, ValidationError
 
 from app.models import ReadinessResponse, RunListResponse, RunResponse, RunSummary
+
+_ModelT = TypeVar("_ModelT", bound=BaseModel)
 
 DEFAULT_BACKEND_URL = "http://127.0.0.1:8000"
 
@@ -79,11 +82,31 @@ def _send(method: str, path: str, *, timeout: Any, **kwargs: Any) -> requests.Re
     url = f"{backend_url()}{path}"
     try:
         return requests.request(method, url, timeout=timeout, **kwargs)
+    except requests.ConnectTimeout as exc:
+        # ConnectTimeout subclasses BOTH Timeout and ConnectionError - it
+        # means the backend never even accepted a TCP connection (not just
+        # "slow to respond"), so it must be checked before the plain
+        # Timeout clause below, or it would be misclassified as
+        # client_timeout instead of backend_unreachable.
+        raise BackendError(
+            f"Can't reach the backend at {backend_url()} - is it running?",
+            code="backend_unreachable",
+        ) from exc
     except requests.Timeout as exc:
         raise BackendError("The backend didn't respond in time.", code="client_timeout") from exc
     except requests.ConnectionError as exc:
         raise BackendError(
             f"Can't reach the backend at {backend_url()} - is it running?",
+            code="backend_unreachable",
+        ) from exc
+    except requests.RequestException as exc:
+        # Catches everything else in the requests exception hierarchy
+        # (MissingSchema, InvalidURL, InvalidSchema, TooManyRedirects, ...)
+        # that isn't a Timeout/ConnectionError - most plausibly a malformed
+        # BACKEND_URL (e.g. missing the "http://" scheme).
+        raise BackendError(
+            f"Couldn't send the request to {backend_url()} - check BACKEND_URL is a valid "
+            f"URL (including the scheme, e.g. http://): {exc}",
             code="backend_unreachable",
         ) from exc
 
@@ -121,13 +144,43 @@ def _raise_for_error(response: requests.Response) -> None:
     )
 
 
+def _decode_json(response: requests.Response) -> Any:
+    """A "successful" (2xx, or 200/503 for readiness) response body that
+    isn't valid JSON - a proxy/gateway error page slipping through with a
+    misleadingly-ok status, say - must not crash the caller with an
+    unhandled `requests.exceptions.JSONDecodeError` (a `ValueError`)."""
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise BackendError(
+            f"The backend returned an unexpected {response.status_code} response.",
+            code="upstream_unavailable",
+            status_code=response.status_code,
+        ) from exc
+
+
+def _validate(model: type[_ModelT], data: Any) -> _ModelT:
+    """A "successful" response body that doesn't match the target model's
+    schema (e.g. a version-skewed backend after a redeploy) must not crash
+    the caller with an unhandled `pydantic.ValidationError` either - both
+    are real possibilities distinct from the non-2xx path `_raise_for_error`
+    already handles."""
+    try:
+        return model.model_validate(data)
+    except ValidationError as exc:
+        raise BackendError(
+            "The backend returned a response that didn't match the expected shape.",
+            code="upstream_unavailable",
+        ) from exc
+
+
 def _request(method: str, path: str, *, timeout: Any, **kwargs: Any) -> dict:
     """The seam nearly every public function in this module funnels
     through - non-2xx always raises here."""
     response = _send(method, path, timeout=timeout, **kwargs)
     if not response.ok:
         _raise_for_error(response)
-    return response.json()
+    return _decode_json(response)
 
 
 def create_run(pdf_bytes: bytes, filename: str) -> RunResponse:
@@ -138,13 +191,13 @@ def create_run(pdf_bytes: bytes, filename: str) -> RunResponse:
         timeout=UPLOAD_TIMEOUT,
         files={"file": (filename, pdf_bytes, "application/pdf")},
     )
-    return RunResponse.model_validate(data)
+    return _validate(RunResponse, data)
 
 
 def get_run(thread_id: str) -> RunResponse:
     """GET /invoices/{thread_id} - reads current state, no execution."""
     data = _request("GET", f"/invoices/{thread_id}", timeout=READ_TIMEOUT)
-    return RunResponse.model_validate(data)
+    return _validate(RunResponse, data)
 
 
 def submit_corrections(thread_id: str, corrections: dict) -> RunResponse:
@@ -167,7 +220,7 @@ def submit_corrections(thread_id: str, corrections: dict) -> RunResponse:
         timeout=RESUME_TIMEOUT,
         json={"corrections": corrections},
     )
-    return RunResponse.model_validate(data)
+    return _validate(RunResponse, data)
 
 
 def retry_run(thread_id: str) -> RunResponse:
@@ -185,14 +238,14 @@ def retry_run(thread_id: str) -> RunResponse:
         timeout=RESUME_TIMEOUT,
         json={"corrections": {}},
     )
-    return RunResponse.model_validate(data)
+    return _validate(RunResponse, data)
 
 
 def list_runs(limit: int = 10) -> list[RunSummary]:
     """GET /invoices?limit=N - recent runs from the LangGraph checkpointer,
     NOT Supabase (see frontend/app.py's module docstring for why)."""
     data = _request("GET", "/invoices", timeout=READ_TIMEOUT, params={"limit": limit})
-    return RunListResponse.model_validate(data).runs
+    return _validate(RunListResponse, data).runs
 
 
 def readiness(*, deep: bool = False) -> ReadinessResponse:
@@ -205,4 +258,4 @@ def readiness(*, deep: bool = False) -> ReadinessResponse:
     response = _send("GET", "/health/ready", timeout=READ_TIMEOUT, params={"deep": deep})
     if response.status_code not in (200, 503):
         _raise_for_error(response)
-    return ReadinessResponse.model_validate(response.json())
+    return _validate(ReadinessResponse, _decode_json(response))

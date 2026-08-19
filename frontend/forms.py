@@ -10,28 +10,25 @@ from __future__ import annotations
 import csv
 import io
 import math
-from datetime import date
 from typing import Optional
 
+from app.models import InvoiceCorrections
 from invoice_agent import db
+from invoice_agent.validate import parse_iso_date
 
+__all__ = [
+    "parse_iso_date",
+    "line_items_to_rows",
+    "rows_to_line_items",
+    "build_corrections",
+    "invoice_to_csv_bytes",
+]
 
-def parse_iso_date(value: Optional[str]) -> Optional[date]:
-    """Best-effort ISO 8601 (YYYY-MM-DD) parse. Returns None both for an
-    empty/missing value and for a non-ISO string - `validate_invoice()`
-    itself would flag a non-ISO date as invalid, so the interrupt payload
-    handed to this frontend can legitimately contain one. The caller (see
-    frontend/app.py) checks the *original* string, not this function's
-    return value, to decide whether to fall back to a plain text input
-    instead of `st.date_input` - `st.date_input(value=...)` cannot accept
-    a non-date string at all.
-    """
-    if not value:
-        return None
-    try:
-        return date.fromisoformat(value)
-    except ValueError:
-        return None
+# parse_iso_date is re-exported from invoice_agent.validate (not
+# reimplemented here) - it used to be a byte-for-byte duplicate of that
+# module's date parser. frontend/app.py's `_date_field` relies on the same
+# ISO-8601-or-None judgment `validate_invoice()` itself makes, so sharing
+# one implementation means the two can't silently diverge on an edge case.
 
 
 def line_items_to_rows(line_items: list[dict]) -> list[dict]:
@@ -131,32 +128,25 @@ def build_corrections(
     Never use this to retry a `failed` thread - that needs a *literally*
     empty corrections body (`frontend.api_client.retry_run`), a completely
     different contract; see that function's docstring.
+
+    Builds and validates a real `app.models.InvoiceCorrections` - not a
+    hand-assembled dict - so a widget value that doesn't actually satisfy
+    the contract (a bad type, in practice) fails here with a clear error
+    instead of silently reaching the HTTP boundary as an untyped dict.
     """
-    return {
-        "invoice_number": invoice_number,
-        "invoice_date": invoice_date,
-        "vendor_name": vendor_name,
-        "bill_to": bill_to,
-        "line_items": line_items,
-        "subtotal": subtotal,
-        "tax": tax,
-        "total": total,
-        "due_date": due_date,
-        "currency": currency,
-    }
-
-
-def _split_csv_fields() -> tuple[list[str], list[str]]:
-    """Recovers the header-field / line-item-field split from
-    `invoice_agent.db.CSV_FIELDS` - that module's own single source of
-    truth for the CSV schema (see its docstring comment on why). `db.py`
-    keeps the two halves as private constants; rather than reach past that
-    underscore or hand-maintain a second copy of the field lists here,
-    this reconstructs the split from `CSV_FIELDS`' own `"line_item_{field}"`
-    naming convention - exactly what `CSV_FIELDS` was built from."""
-    line_item_fields = [f[len("line_item_") :] for f in db.CSV_FIELDS if f.startswith("line_item_")]
-    header_fields = [f for f in db.CSV_FIELDS if not f.startswith("line_item_")]
-    return header_fields, line_item_fields
+    corrections = InvoiceCorrections(
+        invoice_number=invoice_number,
+        invoice_date=invoice_date,
+        vendor_name=vendor_name,
+        bill_to=bill_to,
+        line_items=line_items,
+        subtotal=subtotal,
+        tax=tax,
+        total=total,
+        due_date=due_date,
+        currency=currency,
+    )
+    return corrections.model_dump(mode="json")
 
 
 def invoice_to_csv_bytes(invoice: dict) -> bytes:
@@ -166,22 +156,14 @@ def invoice_to_csv_bytes(invoice: dict) -> bytes:
     server-side file (`exports/invoices.csv`) a separately-deployed
     frontend container (Phase 10) has no filesystem access to, and it
     appends to a running multi-invoice log rather than producing a
-    one-invoice download - a different job entirely. This mirrors
-    `export_invoice_csv`'s exact row-building logic (one row per line
-    item, header fields repeated, `line_items or [{}]` so a zero-line-item
-    invoice still emits one row) against the same `CSV_FIELDS`, so this
-    download's schema can't silently drift from the server-side export's.
+    one-invoice download - a different job entirely. Row assembly itself
+    is shared with `export_invoice_csv` via `db.invoice_csv_rows()`, so
+    this download's schema can't silently drift from the server-side
+    export's - only the "how/where to write it" differs.
     """
-    header_fields, line_item_fields = _split_csv_fields()
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=db.CSV_FIELDS)
     writer.writeheader()
-
-    header_values = {field: invoice.get(field) for field in header_fields}
-    line_items = invoice.get("line_items") or [{}]
-    for item in line_items:
-        row = dict(header_values)
-        row.update({f"line_item_{field}": item.get(field) for field in line_item_fields})
+    for row in db.invoice_csv_rows(invoice):
         writer.writerow(row)
-
     return buffer.getvalue().encode("utf-8")
