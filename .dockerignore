@@ -1,0 +1,82 @@
+# Mirrors .gitignore for the Docker build context, plus a few things
+# .gitignore doesn't need to cover (.git/ itself, docs/ROADMAP.md, and -
+# most importantly - .env, which physically exists on disk with real
+# credentials and would otherwise land in a build layer). See Dockerfile's
+# runtime stage: it COPYs only specific source directories from the
+# builder stage rather than the whole build context, so tests/ and
+# scripts/ (needed for `uv sync --locked` to install the project as
+# declared, same as local dev) never reach the final image either way -
+# this file's job is keeping secrets and dev cruft out of *every* stage.
+
+# Git
+.git/
+.gitignore
+
+# Secrets — never commit, never build in
+.env
+.env.*
+*credentials*.json
+*gcp-oauth*.json
+*token*.json
+service-account*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# LangGraph checkpoints / local state - runtime data, not build input
+*.sqlite
+*.sqlite3
+checkpoints/
+
+# Ingested / working data - runtime data, not build input
+attachments/
+uploads/
+exports/
+data/samples/
+data/inbox/
+
+# Internal build-plan working doc, not a published deliverable
+docs/ROADMAP.md
+
+# Eval harness prediction cache - transient, not the committed dataset/report
+evals/.cache/
+
+# Logs
+*.log
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Docker
+*.env.docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Claude Code / CI - irrelevant to the running app
+.claude/
+.github/
