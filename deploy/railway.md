@@ -22,12 +22,19 @@ instead of a box you fully control.
 1. **Account** — [railway.app](https://railway.app), sign in with GitHub.
    Railway asks for a payment method before deploying anything — this is
    Railway's own requirement, not optional even on a trial.
-2. **New Project → Deploy from GitHub repo** → select this repository.
-   Railway creates one service from the Dockerfile it finds at the repo
-   root. Rename it `backend` (Settings → General).
-3. **Add a second service** to the same project (`+ New` → `GitHub Repo`
-   → the same repository again) — this creates a second, independent
-   service also built from the same `Dockerfile`. Rename it `frontend`.
+2. **New Project → Deploy an existing image** → enter
+   `ghcr.io/<owner>/invoice-agent:latest` (lowercased owner, e.g.
+   `humdaansyed`). This needs `.github/workflows/docker-build.yml` to have
+   already published the image at least once, and needs the GHCR package
+   to be pullable — do `deploy/ec2.md`'s step 6 (make the package public,
+   or hand Railway registry credentials) first if you haven't. Rename the
+   service `backend` (Settings → General). Deploying from the image
+   directly — not "Deploy from GitHub repo" — is what actually gets you
+   the pre-built image instead of Railway rebuilding the `Dockerfile`
+   itself on every deploy.
+3. **Add a second service** to the same project (`+ New` → `Docker Image`
+   → the same `ghcr.io/<owner>/invoice-agent:latest`). Rename it
+   `frontend`.
 4. **Configure `backend`** (Settings tab):
    - **Deploy → Custom Start Command**: leave blank — the Dockerfile's
      default `CMD` (uvicorn on port 8000) is exactly what you want.
@@ -38,18 +45,26 @@ instead of a box you fully control.
    - **Variables**: add `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_KEY`
      (required), and optionally `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY`/
      `LANGFUSE_HOST` (tracing is genuinely optional — the app runs
-     untraced if these are unset). Also set `CHECKPOINT_DB_PATH=/data/
-     checkpoints/graph.sqlite` and `UPLOAD_DIR=/data/uploads` — see step 5.
+     untraced if these are unset). Also set these two, each on one line —
+     see step 5 for why:
+     - `CHECKPOINT_DB_PATH=/data/checkpoints/graph.sqlite`
+     - `UPLOAD_DIR=/data/uploads`
 5. **Add a Volume to `backend`** (Settings → Volumes → New Volume), mount
    path `/data`. Railway volumes are one-per-service, so both
    `checkpoints/` and `uploads/` share it via the env vars set in step 4 —
    without this, both are wiped on every redeploy (Railway's filesystem is
-   otherwise ephemeral).
+   otherwise ephemeral). The image pre-creates and chowns `/data` to the
+   non-root `app` user (`Dockerfile`) specifically so a fresh volume
+   mounted here inherits writable ownership instead of coming up
+   root-owned. If the backend still crash-loops with a `PermissionError`
+   on `/data/checkpoints` right after adding the volume, that inheritance
+   didn't happen (platform-dependent) — the one-time fix is
+   `railway run --service backend -- chown -R app:app /data`.
 6. **Configure `frontend`** (Settings tab):
-   - **Deploy → Custom Start Command**:
-     ```
-     streamlit run frontend/app.py --server.address=0.0.0.0 --server.port=8501 --server.headless=true --server.fileWatcherType=none --browser.gatherUsageStats=false
-     ```
+   - **Deploy → Custom Start Command**: `sh frontend/start.sh` — the same
+     script `docker-compose.yml` and `deploy/ec2.md` run, so the actual
+     Streamlit flags live in one place ([frontend/start.sh](../frontend/start.sh))
+     instead of being retyped here too.
    - **Networking → Generate Domain**, target port `8501`. This is the
      public URL for the demo.
    - **Variables**: `BACKEND_URL=http://backend.railway.internal:8000`
@@ -69,6 +84,13 @@ instead of a box you fully control.
 
 ## Known limitations
 
+- **No automatic redeploy on a new image push.** Deploying from
+  `ghcr.io/<owner>/invoice-agent:latest` (steps 2–3) pins to whatever
+  `:latest` resolved to at deploy time — Railway doesn't poll external
+  registries for new tags, so a later push to `main` doesn't reach either
+  service until you manually hit Redeploy (or wire up a Railway API call
+  in the CI workflow, not set up here). Same limitation `deploy/ec2.md`
+  documents for the EC2 box.
 - **`exports/invoices.csv` has no env-var override** (unlike checkpoints/
   uploads — see `invoice_agent/graph.py`'s `EXPORT_CSV_PATH`), so it's
   **not** on the volume and is lost on every redeploy. Fine for a demo;

@@ -37,15 +37,22 @@ build on the box.
    sudo swapon /swapfile
    echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
    ```
-6. **Make the GHCR package pullable.** `.github/workflows/docker-build.yml`
-   pushes using the repo's built-in `GITHUB_TOKEN`, and GHCR packages
-   built this way can default to **private** visibility even though the
-   source repo is public — check
+6. **Make the GHCR package pullable — a one-time repo setting, not a
+   per-deploy step.** `.github/workflows/docker-build.yml` pushes using
+   the repo's built-in `GITHUB_TOKEN`, and GHCR packages default to
+   **private** visibility the first time they're created this way, even
+   though the source repo is public. Right after the workflow's first
+   successful run, check
    `github.com/<owner>?tab=packages` → `invoice-agent` → Package settings,
    and if it shows private, either flip it to public (simplest, matches
    this being a portfolio project with no real secrets in the image), or
    keep it private and `docker login ghcr.io` on the box with a
-   classic PAT scoped to `read:packages`.
+   classic PAT scoped to `read:packages`. The setting then persists
+   across every future push to the same package — nothing in CI resets
+   it — so this doesn't need repeating. The one case where it does: if
+   the package is ever deleted (not just its versions — the whole
+   package, e.g. via a repo/org transfer) and a later push recreates it
+   from scratch, it comes back private and this step needs redoing once.
 7. **Write the production compose file** on the box — deliberately not a
    tracked repo file, since it references an image tag instead of
    building locally (see "Why not commit a second compose file" below):
@@ -64,15 +71,16 @@ build on the box.
 
      frontend:
        image: ghcr.io/<owner>/invoice-agent:latest
-       command:
-         - streamlit
-         - run
-         - frontend/app.py
-         - --server.address=0.0.0.0
-         - --server.port=8501
-         - --server.headless=true
-         - --server.fileWatcherType=none
-         - --browser.gatherUsageStats=false
+       command: ["sh", "frontend/start.sh"]
+       healthcheck:
+         # Overrides the image's baked-in HEALTHCHECK (which probes the
+         # backend's port 8000 and can never succeed in this container) -
+         # see docker-compose.yml for the full explanation.
+         test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+         interval: 30s
+         timeout: 3s
+         start_period: 10s
+         retries: 3
        env_file: [.env]
        environment:
          BACKEND_URL: http://backend:8000

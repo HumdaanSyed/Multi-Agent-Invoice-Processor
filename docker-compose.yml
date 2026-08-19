@@ -3,6 +3,11 @@
 # deployment (Railway/EC2) is documented separately in deploy/ - this file
 # is for `docker compose up` on your own machine.
 #
+# `image:` is set to the same tag on both services, with `build:` only on
+# `backend` - Compose then builds once under that tag and `frontend` just
+# runs it, rather than each service getting its own independent `build: .`
+# (which used to silently produce two separate ~945MB images).
+#
 # Named volumes, not bind mounts, for checkpoints/uploads/exports: the
 # runtime image runs as a non-root user (Dockerfile), and a bind mount
 # preserves the HOST directory's ownership inside the container - on a
@@ -16,6 +21,7 @@
 services:
   backend:
     build: .
+    image: invoice-agent:local
     ports:
       - "8000:8000"
     env_file:
@@ -29,16 +35,21 @@ services:
     # HEALTHCHECK instruction, which frontend's depends_on below reads.
 
   frontend:
-    build: .
-    command:
-      - streamlit
-      - run
-      - frontend/app.py
-      - --server.address=0.0.0.0
-      - --server.port=8501
-      - --server.headless=true
-      - --server.fileWatcherType=none
-      - --browser.gatherUsageStats=false
+    image: invoice-agent:local
+    command: ["sh", "frontend/start.sh"]
+    healthcheck:
+      # The Dockerfile's own HEALTHCHECK is baked into the image and
+      # probes the backend's port 8000 - `command:` above doesn't replace
+      # it, so without this override frontend would inherit a healthcheck
+      # that can never succeed (nothing listens on 8000 in this
+      # container) and would report unhealthy forever despite serving
+      # traffic correctly on 8501. /_stcore/health is Streamlit's own
+      # built-in health endpoint.
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
     ports:
       - "8501:8501"
     env_file:
