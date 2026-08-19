@@ -6,6 +6,12 @@
       "runtimeExecutable": "uv",
       "runtimeArgs": ["run", "uvicorn", "app.main:app", "--reload"],
       "port": 8000
+    },
+    {
+      "name": "streamlit-frontend",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "streamlit", "run", "frontend/app.py", "--server.headless", "true"],
+      "port": 8501
     }
   ]
 }
