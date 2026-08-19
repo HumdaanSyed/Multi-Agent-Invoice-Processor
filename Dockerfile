@@ -27,13 +27,21 @@ ENV UV_COMPILE_BYTECODE=1 \
 # code edit. --locked (not a plain sync) fails the build if the lockfile
 # is stale instead of silently re-resolving - the same reproducibility
 # guarantee `uv sync --locked` gives locally.
-# Explicit `id=uv-cache` on the cache mount: standard docker/buildx infers
-# an id from the target path when one isn't given, but Railway's builder
-# rejects an id-less cache mount outright ("missing an id argument") -
-# the explicit id works on both.
+# No `--mount=type=cache` here (tried, then reverted): standard
+# docker/buildx accepts a cache mount with no `id=` (infers one from the
+# target path); Railway's builder rejected that outright, then rejected
+# an explicit `id=uv-cache` too, requiring instead a literal
+# `id=s/<railway-service-id>-...` with the real service ID hardcoded in
+# the Dockerfile (env vars/build-args aren't evaluated in that position -
+# confirmed via Railway's own docs and community reports). This file
+# builds identically for local dev, CI, and - per deploy/railway.md - two
+# *separate* Railway services from the same Dockerfile; hardcoding one
+# service's ID would break the others, so a cache mount isn't worth it
+# here. This layer is still cached at the Docker-layer level (unchanged
+# between builds when pyproject.toml/uv.lock don't change) - it just
+# doesn't get uv's own finer-grained package cache on top of that.
 COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv,id=uv-cache \
-    uv sync --locked --no-install-project --no-dev
+RUN uv sync --locked --no-install-project --no-dev
 
 # Now the source. uv_build's module-root="" (pyproject.toml) discovers
 # every top-level importable package when installing the project itself,
@@ -41,8 +49,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,id=uv-cache \
 # through, not just app/invoice_agent/frontend. The runtime stage below is
 # what actually trims the image down.
 COPY . .
-RUN --mount=type=cache,target=/root/.cache/uv,id=uv-cache \
-    uv sync --locked --no-dev
+RUN uv sync --locked --no-dev
 
 # --- runtime -----------------------------------------------------------
 FROM python:3.12-slim AS runtime

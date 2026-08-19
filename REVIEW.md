@@ -327,14 +327,27 @@ instance of any of these as high-confidence, not merely plausible:
   '--mount=type=cache,target=/root/.cache/uv' is missing an id argument`.
   Bit us in `Dockerfile` (Phase 10 review): both `uv sync` cache-mount
   `RUN` lines built and ran fine in every local/CI verification pass, then
-  failed on the very first real Railway deploy. Fixed by adding an
-  explicit `id=uv-cache` (valid on both builders). Local `docker build`/
-  `docker compose build`/a GitHub Actions Buildx job all share the same
-  underlying BuildKit, so passing all three does not establish a
-  Dockerfile is portable to a *different* builder implementation — a
-  platform-specific builder (Railway, Google Cloud Build, etc.) is only
-  actually verified by a real deploy through it, and that step can't be
-  skipped just because every other builder accepted the same file.
+  failed on the very first real Railway deploy. The first fix attempt —
+  adding an explicit `id=uv-cache` — was still wrong: Railway's next error
+  (`missing the cacheKey prefix from its id`) revealed it actually
+  requires the id literally prefixed `s/<railway-service-id>-...`, with
+  the real service ID hardcoded in the Dockerfile (confirmed via Railway's
+  own docs — env vars/build-args aren't evaluated in that position, so
+  there's no way to parameterize it). That's incompatible with a single
+  Dockerfile meant to build identically for local dev, CI, and multiple
+  Railway services — hardcoding one service's ID would break the others.
+  Final fix: drop the cache mount entirely; it's a build-speed
+  optimization, not a correctness requirement, and the Docker-layer cache
+  already covers the common case (nothing changed upstream). General
+  lesson: local `docker build`/`docker compose build`/a GitHub Actions
+  Buildx job all share the same underlying BuildKit, so passing all three
+  does not establish a Dockerfile is portable to a *different* builder
+  implementation — a platform-specific builder (Railway, Google Cloud
+  Build, etc.) is only actually verified by a real deploy through it, and
+  a first "fix" based on the first error message alone can still be wrong
+  if that platform has more than one non-standard requirement stacked on
+  the same line — expect to iterate against the real builder, not solve
+  it from the error text alone on the first try.
 
 ## Known intentional patterns — do not re-flag
 
