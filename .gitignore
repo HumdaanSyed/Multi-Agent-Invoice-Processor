@@ -52,6 +52,7 @@ uploads/
 # deliverable - the rest of docs/ (observability.md, mcp_setup.md, api.md)
 # IS committed and referenced by CLAUDE.md/the README.
 docs/ROADMAP.md
+docs/demo_script.md
 
 # Eval harness - data/eval/*.pdf, evals/dataset.jsonl, and evals/report.md
 # are committed deliverables (synthetic fixtures, no privacy exposure; see
