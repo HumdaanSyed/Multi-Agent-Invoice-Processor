@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Annotated, Literal, Optional, TypedDict
 
 from anthropic import Anthropic
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
@@ -24,9 +25,9 @@ from langgraph.graph.message import add_messages
 from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
-from invoice_agent import db
+from invoice_agent import db, events
 from invoice_agent.extract import MODEL as EXTRACT_MODEL
-from invoice_agent.extract import extract_invoice
+from invoice_agent.extract import extract_invoice, extract_invoice_streaming
 from invoice_agent.tracing import trace_callbacks, traced_generation
 from invoice_agent.validate import validate_invoice
 
@@ -72,8 +73,23 @@ def _load_pdf_b64(file_path: str) -> str:
     return base64.standard_b64encode(Path(file_path).read_bytes()).decode("utf-8")
 
 
-def router(state: GraphState) -> dict:
+def _thread_id(config: Optional[RunnableConfig]) -> Optional[str]:
+    return (config or {}).get("configurable", {}).get("thread_id")
+
+
+def _publish(config: Optional[RunnableConfig], event_type: str, **payload) -> None:
+    """No-op unless this run has an open event channel (Phase 8.5) - the
+    common case for evals/MCP ingestion/scripts, none of which reserve
+    one. `events.publish` itself never raises; this helper exists so every
+    call site here reads as one line instead of an inline None-check."""
+    thread_id = _thread_id(config)
+    if thread_id is not None:
+        events.publish(thread_id, event_type, **payload)
+
+
+def router(state: GraphState, config: Optional[RunnableConfig] = None) -> dict:
     """Classify the document type via a structured-output Claude call."""
+    _publish(config, "stage", node="router", stage="classifying")
     pdf_b64 = _load_pdf_b64(state["file_path"])
 
     # timeout bounds the FastAPI backend's blocking POST /invoices (Phase 8)
@@ -113,18 +129,34 @@ def router(state: GraphState) -> dict:
     }
 
 
-def extractor(state: GraphState) -> dict:
+def extractor(state: GraphState, config: Optional[RunnableConfig] = None) -> dict:
     """Extract structured invoice data via the Phase 1 function."""
+    _publish(config, "stage", node="extractor", stage="extracting")
     response = None
 
     def _capture_response(r):
         nonlocal response
         response = r
 
+    thread_id = _thread_id(config)
+    # Only pay for the streaming call shape when something is actually
+    # listening - the non-streaming extract_invoice() path (what the eval
+    # harness and MCP ingestion use) is untouched either way.
+    on_field = (
+        (lambda name, value: events.publish(thread_id, "field", name=name, value=value))
+        if thread_id is not None and events.has_channel(thread_id)
+        else None
+    )
+
     with traced_generation(
         "extract-invoice", model=EXTRACT_MODEL, input_data={"file_path": state["file_path"]}
     ) as gen:
-        invoice = extract_invoice(state["file_path"], on_response=_capture_response)
+        if on_field is not None:
+            invoice = extract_invoice_streaming(
+                state["file_path"], on_response=_capture_response, on_field=on_field
+            )
+        else:
+            invoice = extract_invoice(state["file_path"], on_response=_capture_response)
         gen.record(
             output=invoice.model_dump(mode="json"),
             usage=response.usage if response is not None else None,
@@ -135,28 +167,41 @@ def extractor(state: GraphState) -> dict:
     }
 
 
-def validator(state: GraphState) -> dict:
+def validator(state: GraphState, config: Optional[RunnableConfig] = None) -> dict:
     """Run deterministic business-rule checks on the extracted invoice."""
-    result = validate_invoice(state["invoice"], duplicate_checker=db.is_duplicate)
+    _publish(config, "stage", node="validator", stage="validating")
+    _publish(config, "validation_start")
+    result = validate_invoice(
+        state["invoice"],
+        duplicate_checker=db.is_duplicate,
+        on_check=lambda check: _publish(config, "check", **check.model_dump()),
+    )
     return {
         "validation": result.model_dump(),
         "status": "needs_review" if result.needs_review else "validated",
     }
 
 
-def human_review(state: GraphState) -> dict:
+def human_review(state: GraphState, config: Optional[RunnableConfig] = None) -> dict:
     """Surface flagged invoices to a human and apply their corrections.
 
     No side effects here (no DB writes, no file I/O) - this node may run
-    more than once across a resume, and interrupts must stay pure.
+    more than once across a resume, and interrupts must stay pure. The two
+    publishes bracketing interrupt() are the exception: publishing to an
+    in-memory event bus is not persistence, and only one of the two lines
+    below ever actually runs per graph.invoke() call (interrupt() unwinds
+    the node on the interrupting call - "review_applied" only publishes on
+    the resuming call, once interrupt() has returned a value).
     """
     validation = state["validation"]
+    _publish(config, "stage", node="human_review", stage="awaiting_review")
     resume_value = interrupt(
         {
             "invoice": state["invoice"],
             "flags": validation["flags"],
         }
     )
+    _publish(config, "stage", node="human_review", stage="review_applied")
 
     edited_invoice = resume_value.get("edited_invoice") if resume_value else None
     if edited_invoice is not None:
@@ -164,9 +209,10 @@ def human_review(state: GraphState) -> dict:
     return {"status": "reviewed"}
 
 
-def output(state: GraphState) -> dict:
+def output(state: GraphState, config: Optional[RunnableConfig] = None) -> dict:
     """Persist the invoice: upload the source PDF, upsert to Supabase (with
     the resulting storage path), and append the CSV export."""
+    _publish(config, "stage", node="output", stage="saving")
     invoice = state["invoice"]
     pdf_storage_path = None
     try:
