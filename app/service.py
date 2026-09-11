@@ -171,6 +171,15 @@ class GraphService:
         self._semaphore = threading.Semaphore(max_concurrency)
         self._thread_locks: dict[str, threading.Lock] = {}
         self._thread_locks_guard = threading.Lock()
+        # One-shot cache from _publish_run_end to the route handler that
+        # called start_run/resume_run, so the DerivedStatus computed to
+        # decide what to publish doesn't get computed a second time (a
+        # second get_snapshot() + derive_status() - a full checkpoint read
+        # and deserialization) moments later to build the HTTP response.
+        # Written under the per-thread_id lock in _guarded_invoke, popped
+        # (not just read) by pop_cached_status so a stale entry can never
+        # be served to an unrelated later request for the same thread_id.
+        self._last_derived: dict[str, DerivedStatus] = {}
 
     def _lock_for(self, thread_id: str) -> threading.Lock:
         # One Lock object per thread_id ever seen, kept for the process's
@@ -219,6 +228,14 @@ class GraphService:
     def get_snapshot(self, thread_id: str) -> StateSnapshot:
         return self._graph.get_state(build_invoke_config(thread_id))
 
+    def pop_cached_status(self, thread_id: str) -> Optional[DerivedStatus]:
+        """Consume the DerivedStatus _publish_run_end computed for
+        thread_id's most recent invoke() call, if any. Returns None on a
+        cache miss (nothing published this run - e.g. _publish_run_end's
+        own guard swallowed an error) so the caller can fall back to a
+        fresh get_snapshot()/derive_status() exactly as before."""
+        return self._last_derived.pop(thread_id, None)
+
     def reserve(self) -> str:
         """Mint a thread_id and open its event channel *before* any graph
         work exists (Phase 8.5) - see app/models.py's RunTicket docstring
@@ -257,6 +274,7 @@ class GraphService:
             return
         if derived is None:
             return
+        self._last_derived[thread_id] = derived
         try:
             if derived.status == "needs_review":
                 events.publish(

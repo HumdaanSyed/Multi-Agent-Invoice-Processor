@@ -146,6 +146,15 @@ def extract_invoice_streaming(
 
     client = Anthropic(timeout=120.0)
     emitted: list[str] = []
+    # Every key but a partial parse's *last* key is provably done (a later
+    # key only appears once the model has moved past this one), so once
+    # every field but the structurally-last one is confirmed, no further
+    # delta can announce anything new until the stream ends - the one
+    # remaining field only ever comes from the final flush below. Skipping
+    # the parse for the rest of the stream avoids re-scanning the whole
+    # accumulated snapshot (from_json's cost grows with response length)
+    # for zero payoff on every remaining delta.
+    total_fields = len(_INVOICE_FIELD_NAMES)
 
     with client.messages.stream(
         model=model or MODEL,
@@ -154,7 +163,7 @@ def extract_invoice_streaming(
         output_format=Invoice,
     ) as stream:
         for event in stream:
-            if event.type != "text" or on_field is None:
+            if event.type != "text" or on_field is None or len(emitted) >= total_fields - 1:
                 continue
             try:
                 partial = from_json(event.snapshot, allow_partial=True)

@@ -59,7 +59,7 @@ def test_open_channel_sweeps_stale_before_rejecting(monkeypatch):
 def test_subscribe_unknown_thread_raises_channel_closed():
     async def _run():
         with pytest.raises(events.ChannelClosed):
-            async for _ in events.subscribe("nope"):
+            async for _item, _is_current in events.subscribe("nope"):
                 pass
 
     asyncio.run(_run())
@@ -89,7 +89,7 @@ def test_publish_cross_thread_delivers_to_subscriber():
         received: list[events.Event] = []
 
         async def _consume():
-            async for item in events.subscribe("t1"):
+            async for item, _is_current in events.subscribe("t1"):
                 if item is not None:
                     received.append(item)
                     if item.type == "run_end":
@@ -153,7 +153,7 @@ def test_close_channel_wakes_attached_subscriber_without_hanging():
 
         async def _consume():
             items = []
-            async for item in events.subscribe("t1"):
+            async for item, _is_current in events.subscribe("t1"):
                 items.append(item)
             return items
 

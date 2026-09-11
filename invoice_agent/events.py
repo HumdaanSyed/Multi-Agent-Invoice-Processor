@@ -96,7 +96,6 @@ class _Channel:
     history: deque = field(default_factory=lambda: deque(maxlen=MAX_HISTORY))
     subscribers: list = field(default_factory=list)
     last_activity: float = field(default_factory=time.time)
-    closed: bool = False
 
 
 _channels: dict[str, _Channel] = {}
@@ -142,30 +141,6 @@ def has_channel(thread_id: str) -> bool:
         return thread_id in _channels
 
 
-def backlog_length(thread_id: str, last_event_id: Optional[int] = None) -> int:
-    """How many history entries subscribe() would replay for thread_id
-    right now, before any live events. The SSE route uses this to tell a
-    *stale* terminal event apart from a *current* one while replaying
-    history: a run that interrupted, then got resumed (which re-enters at
-    human_review -> validator, per invoice_agent/graph.py's unconditional
-    edge, so a second pass republishes its own validation_start/checks/
-    interrupted or run_end) leaves an earlier "interrupted" sitting
-    mid-history with more, newer events after it - only the *last* replayed
-    item closing the connection is correct; an early one closing it would
-    truncate the reply before the resume's own events ever get sent.
-
-    Called immediately before subscribe() in the same coroutine, with no
-    `await` between the two calls - so there's no window for a publish to
-    land in between and desync the count from what subscribe() actually
-    replays.
-    """
-    with _lock:
-        channel = _channels.get(thread_id)
-        if channel is None:
-            return 0
-        return sum(1 for e in channel.history if last_event_id is None or e.seq > last_event_id)
-
-
 def publish(thread_id: str, event_type: str, **payload: Any) -> None:
     """Publish an event to thread_id's channel, if one is open.
 
@@ -178,7 +153,7 @@ def publish(thread_id: str, event_type: str, **payload: Any) -> None:
     try:
         with _lock:
             channel = _channels.get(thread_id)
-            if channel is None or channel.closed:
+            if channel is None:
                 return
             seq = channel.seq
             channel.seq += 1
@@ -224,9 +199,17 @@ def _deliver(subscriber: _Subscriber, event: Event) -> None:
     so checking `queue.full()` then acting on it here is race-free).
     Bounded queue, drop-oldest on overflow so the queue can never make
     publish() block, and so the most recent (most important - often the
-    terminal) event is the one that survives, not the one discarded."""
+    terminal) event is the one that survives, not the one discarded.
+
+    `dropped` marks one overflow *episode*, not the connection's lifetime:
+    it's checked (and reset) against the queue's fullness *before* this
+    delivery, so a subscriber that overflows, drains as the client catches
+    up, then falls behind again later gets a fresh `overflow` marker for
+    the second episode too - not just the first one ever."""
     queue = subscriber.queue
-    if queue.full() and not subscriber.dropped:
+    if not queue.full():
+        subscriber.dropped = False
+    elif not subscriber.dropped:
         subscriber.dropped = True
         _put_drop_oldest(
             queue, Event(type="overflow", thread_id=event.thread_id, seq=event.seq, payload={})
@@ -248,29 +231,14 @@ def close_channel(thread_id: str) -> None:
         channel = _channels.pop(thread_id, None)
         if channel is None:
             return
-        channel.closed = True
         subscribers = list(channel.subscribers)
 
     loop = _loop
     for subscriber in subscribers:
         if loop is not None:
-            loop.call_soon_threadsafe(_put_done, subscriber.queue)
+            loop.call_soon_threadsafe(_put_drop_oldest, subscriber.queue, _DONE)
         else:
-            _put_done(subscriber.queue)
-
-
-def _put_done(queue: "asyncio.Queue[Any]") -> None:
-    try:
-        queue.put_nowait(_DONE)
-    except asyncio.QueueFull:
-        try:
-            queue.get_nowait()
-        except asyncio.QueueEmpty:
-            pass
-        try:
-            queue.put_nowait(_DONE)
-        except asyncio.QueueFull:
-            pass
+            _put_drop_oldest(subscriber.queue, _DONE)
 
 
 def sweep_stale(max_age_seconds: float = CHANNEL_TTL_SECONDS) -> int:
@@ -302,17 +270,34 @@ def reset() -> None:
     _loop = None
 
 
-async def subscribe(thread_id: str, *, last_event_id: Optional[int] = None) -> AsyncIterator[Optional[Event]]:
-    """Attach to thread_id's channel and yield events as they arrive.
+async def subscribe(
+    thread_id: str, *, last_event_id: Optional[int] = None
+) -> AsyncIterator[tuple[Optional[Event], bool]]:
+    """Attach to thread_id's channel and yield `(item, is_current)` pairs
+    as events arrive.
 
-    Yields the channel's history (filtered to `seq > last_event_id` when
-    given, for an EventSource reconnect), then live events, then returns
-    when the channel is closed. Yields `None` on each idle heartbeat
-    timeout (not a sleep between real events - `wait_for`'s timeout is a
-    read timeout on an otherwise-blocking get(); a real event is still
-    forwarded the instant it arrives). Raises ChannelClosed if no channel
-    is open for thread_id - the caller (the SSE route) treats that as
-    "fall back to a one-shot snapshot instead."
+    Yields the channel's history first (filtered to `seq > last_event_id`
+    when given, for an EventSource reconnect), then live events, then
+    returns when the channel is closed. `item` is `None` on each idle
+    heartbeat timeout (not a sleep between real events - `wait_for`'s
+    timeout is a read timeout on an otherwise-blocking get(); a real event
+    is still forwarded the instant it arrives).
+
+    `is_current` is False only for a backlog item that something *newer*
+    already supersedes - the *last* backlog item and every live item after
+    it are always `is_current=True`. This matters because a run that
+    interrupted and was then resumed re-enters at `human_review ->
+    validator` (an unconditional edge - invoice_agent/graph.py) and
+    republishes a fresh validation_start/checks/interrupted-or-run_end, so
+    an earlier "interrupted" can sit mid-history with more, newer events
+    after it. The caller (the SSE route) closes the connection on a
+    terminal-type event only when `is_current` is True, so a stale
+    historical interrupt can never truncate a reply before a resume's own
+    events are sent - computed here as one pass under one lock acquisition
+    (no separate count that could desync from what's actually replayed).
+
+    Raises ChannelClosed if no channel is open for thread_id - the caller
+    treats that as "fall back to a one-shot snapshot instead."
     """
     with _lock:
         channel = _channels.get(thread_id)
@@ -324,17 +309,18 @@ async def subscribe(thread_id: str, *, last_event_id: Optional[int] = None) -> A
         backlog = [e for e in channel.history if last_event_id is None or e.seq > last_event_id]
 
     try:
-        for event in backlog:
-            yield event
+        last_index = len(backlog) - 1
+        for i, event in enumerate(backlog):
+            yield event, i == last_index
         while True:
             try:
                 item = await asyncio.wait_for(queue.get(), timeout=HEARTBEAT_SECONDS)
             except asyncio.TimeoutError:
-                yield None
+                yield None, True
                 continue
             if item is _DONE:
                 return
-            yield item
+            yield item, True
     finally:
         with _lock:
             try:

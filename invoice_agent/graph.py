@@ -188,10 +188,21 @@ def human_review(state: GraphState, config: Optional[RunnableConfig] = None) -> 
     No side effects here (no DB writes, no file I/O) - this node may run
     more than once across a resume, and interrupts must stay pure. The two
     publishes bracketing interrupt() are the exception: publishing to an
-    in-memory event bus is not persistence, and only one of the two lines
-    below ever actually runs per graph.invoke() call (interrupt() unwinds
-    the node on the interrupting call - "review_applied" only publishes on
-    the resuming call, once interrupt() has returned a value).
+    in-memory event bus is not persistence. They are NOT exactly-once
+    across the two invoke() calls, though: LangGraph re-executes an
+    interrupted node from the top on resume (it does not resume mid-
+    function), so on the *resuming* call both lines run back to back -
+    "awaiting_review" publishes again (a harmless but redundant restate of
+    a stage that already happened during the interrupting call), then
+    interrupt() returns immediately with the resume value instead of
+    pausing, then "review_applied" publishes right after it. Only the
+    *interrupting* call is exactly-one-line ("awaiting_review", then
+    interrupt() unwinds the node before "review_applied" is ever reached).
+    An SSE client sees this as awaiting_review immediately followed by
+    review_applied on every resume - harmless to a client that treats
+    review_applied as the state to act on, but not the single clean
+    "awaiting_review, later, review_applied" timeline a first read of
+    this node might suggest.
     """
     validation = state["validation"]
     _publish(config, "stage", node="human_review", stage="awaiting_review")

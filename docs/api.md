@@ -125,7 +125,10 @@ history, followed by whatever comes next live.
 | `check` | `check_id`, `label`, `passed`, `detail`, `skipped` | One validation rule resolved. `check_id` is a stable string (`line_items_sum`, `totals_match`, `invoice_date_valid`, `due_date_valid`, `due_date_after_invoice_date`, `not_duplicate`) — safe to key UI state/ordering off, unsafe to rename. |
 | `interrupted` | `status`, `invoice`, `flags` | The run is now `needs_review` and paused. **The channel stays open** (a resume needs somewhere to keep publishing) but **this closes the current SSE connection** — open a *new* `GET .../stream` after calling resume, don't expect the old connection to resume delivering. |
 | `run_end` | `status` | Terminal (`completed`/`skipped`/`failed`). Closes the connection and the channel. |
-| `overflow` | — | This subscriber's queue overflowed and the oldest buffered events were dropped — fall back to `GET /invoices/{thread_id}` for the authoritative current state. |
+| `overflow` | — | This subscriber's queue overflowed and the oldest buffered events were dropped — fall back to `GET /invoices/{thread_id}` for the authoritative current state. Can fire more than once per connection if the client falls behind, catches up, then falls behind again. |
+| `snapshot` | *(the same shape `GET /invoices/{thread_id}` returns)* | Connecting after the channel already closed — a one-shot status, not a live event. Always followed immediately by `done`. |
+| `done` | — | Closes the connection after a `snapshot`. |
+| `error` | `code`, `message` | A narrow race (the channel vanished between this route's initial check and actually attaching) left nothing to report — the 200/`text/event-stream` response was already committed by this point, so this is a best-effort in-band error rather than an HTTP-level one. Treat like `run_end`: closes the connection. |
 
 **The honest limitation:** `field` events come from a partial-JSON parse of
 Claude's in-progress structured-output stream (`invoice_agent/extract.py`'s

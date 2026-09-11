@@ -86,134 +86,82 @@ def run_checks(
     always produced in `ValidationResult.flags` - existing tests assert
     exact flag text, and that must keep working unchanged.
     """
-    results: list[CheckResult] = []
+    # Shared intermediate values, computed once up front - due_date_valid
+    # and due_date_after_invoice_date both need parsed dates, and
+    # line_items_sum/totals_match both need rounded sums.
+    line_item_sum = round(sum(item.amount for item in inv.line_items), 2)
+    expected_total = round(inv.subtotal + inv.tax, 2)
+    invoice_date = parse_iso_date(inv.invoice_date)
+    due_date = parse_iso_date(inv.due_date) if inv.due_date is not None else None
 
-    def _emit(result: CheckResult) -> CheckResult:
+    line_items_ok = abs(line_item_sum - inv.subtotal) <= TOLERANCE
+    totals_ok = abs(expected_total - inv.total) <= TOLERANCE
+    invoice_date_ok = invoice_date is not None
+    due_date_ok = due_date is not None if inv.due_date is not None else None  # None = not applicable
+    order_ok = due_date >= invoice_date if invoice_date is not None and due_date is not None else None
+    is_dup = duplicate_checker(inv.vendor_name, inv.invoice_number) if duplicate_checker is not None else None
+
+    # One row per check: (check_id, label, passed, detail-if-failed,
+    # applicable). `applicable=False` means "not applicable to this
+    # invoice" (no due_date, no duplicate_checker given) - `skipped=True`
+    # on the resulting CheckResult, not a pass/fail judgment at all.
+    rows: list[tuple[str, str, bool, str, bool]] = [
+        (
+            "line_items_sum",
+            "Line items sum to subtotal",
+            line_items_ok,
+            f"Line items sum to {line_item_sum:.2f} but subtotal is {inv.subtotal:.2f}",
+            True,
+        ),
+        (
+            "totals_match",
+            "Subtotal plus tax equals total",
+            totals_ok,
+            f"Subtotal + tax = {expected_total:.2f} but total is {inv.total:.2f}",
+            True,
+        ),
+        (
+            "invoice_date_valid",
+            "Invoice date is a valid date",
+            invoice_date_ok,
+            f"invoice_date '{inv.invoice_date}' is not a valid ISO 8601 date",
+            True,
+        ),
+        (
+            "due_date_valid",
+            "Due date is a valid date",
+            True if due_date_ok is None else due_date_ok,
+            f"due_date '{inv.due_date}' is not a valid ISO 8601 date",
+            due_date_ok is not None,
+        ),
+        (
+            "due_date_after_invoice_date",
+            "Due date is on or after invoice date",
+            True if order_ok is None else order_ok,
+            f"due_date {inv.due_date} is before invoice_date {inv.invoice_date}",
+            order_ok is not None,
+        ),
+        (
+            "not_duplicate",
+            "Not a duplicate of an existing invoice",
+            True if is_dup is None else not is_dup,
+            f"Possible duplicate: vendor={inv.vendor_name!r} number={inv.invoice_number!r}",
+            is_dup is not None,
+        ),
+    ]
+
+    results: list[CheckResult] = []
+    for check_id, label, passed, detail_if_failed, applicable in rows:
+        result = CheckResult(
+            check_id=check_id,
+            label=label,
+            passed=passed,
+            detail=None if passed or not applicable else detail_if_failed,
+            skipped=not applicable,
+        )
         results.append(result)
         if on_check is not None:
             on_check(result)
-        return result
-
-    line_item_sum = round(sum(item.amount for item in inv.line_items), 2)
-    line_items_ok = abs(line_item_sum - inv.subtotal) <= TOLERANCE
-    _emit(
-        CheckResult(
-            check_id="line_items_sum",
-            label="Line items sum to subtotal",
-            passed=line_items_ok,
-            detail=(
-                None
-                if line_items_ok
-                else f"Line items sum to {line_item_sum:.2f} but subtotal is {inv.subtotal:.2f}"
-            ),
-        )
-    )
-
-    expected_total = round(inv.subtotal + inv.tax, 2)
-    totals_ok = abs(expected_total - inv.total) <= TOLERANCE
-    _emit(
-        CheckResult(
-            check_id="totals_match",
-            label="Subtotal plus tax equals total",
-            passed=totals_ok,
-            detail=(
-                None
-                if totals_ok
-                else f"Subtotal + tax = {expected_total:.2f} but total is {inv.total:.2f}"
-            ),
-        )
-    )
-
-    invoice_date = parse_iso_date(inv.invoice_date)
-    invoice_date_ok = invoice_date is not None
-    _emit(
-        CheckResult(
-            check_id="invoice_date_valid",
-            label="Invoice date is a valid date",
-            passed=invoice_date_ok,
-            detail=(
-                None
-                if invoice_date_ok
-                else f"invoice_date '{inv.invoice_date}' is not a valid ISO 8601 date"
-            ),
-        )
-    )
-
-    due_date: date | None = None
-    if inv.due_date is None:
-        _emit(
-            CheckResult(
-                check_id="due_date_valid",
-                label="Due date is a valid date",
-                passed=True,
-                skipped=True,
-            )
-        )
-    else:
-        due_date = parse_iso_date(inv.due_date)
-        due_date_ok = due_date is not None
-        _emit(
-            CheckResult(
-                check_id="due_date_valid",
-                label="Due date is a valid date",
-                passed=due_date_ok,
-                detail=(
-                    None
-                    if due_date_ok
-                    else f"due_date '{inv.due_date}' is not a valid ISO 8601 date"
-                ),
-            )
-        )
-
-    if invoice_date is None or due_date is None:
-        # Not applicable when either date failed to parse - the parse
-        # failure above is already flagged; this check has nothing to add.
-        _emit(
-            CheckResult(
-                check_id="due_date_after_invoice_date",
-                label="Due date is on or after invoice date",
-                passed=True,
-                skipped=True,
-            )
-        )
-    else:
-        order_ok = due_date >= invoice_date
-        _emit(
-            CheckResult(
-                check_id="due_date_after_invoice_date",
-                label="Due date is on or after invoice date",
-                passed=order_ok,
-                detail=(
-                    None
-                    if order_ok
-                    else f"due_date {inv.due_date} is before invoice_date {inv.invoice_date}"
-                ),
-            )
-        )
-
-    if duplicate_checker is None:
-        _emit(
-            CheckResult(
-                check_id="not_duplicate",
-                label="Not a duplicate of an existing invoice",
-                passed=True,
-                skipped=True,
-            )
-        )
-    else:
-        is_dup = duplicate_checker(inv.vendor_name, inv.invoice_number)
-        _emit(
-            CheckResult(
-                check_id="not_duplicate",
-                label="Not a duplicate of an existing invoice",
-                passed=not is_dup,
-                detail=(
-                    None
-                    if not is_dup
-                    else f"Possible duplicate: vendor={inv.vendor_name!r} number={inv.invoice_number!r}"
-                ),
-            )
-        )
 
     return results
 

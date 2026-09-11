@@ -78,10 +78,20 @@ def _to_run_response(thread_id: str, derived: DerivedStatus) -> RunResponse:
 
 
 def _current_status(service: GraphService, thread_id: str) -> DerivedStatus:
-    """Re-reads status via get_state()/derive_status() after an invoke,
-    rather than trusting graph.invoke()'s own return value - so POST, GET,
-    and resume all build their response through the exact same path instead
-    of two subtly-different ones that could drift apart."""
+    """Status via get_state()/derive_status() after an invoke, rather than
+    trusting graph.invoke()'s own return value - so POST, GET, and resume
+    all build their response through the exact same derive_status() path
+    instead of two subtly-different ones that could drift apart.
+
+    `pop_cached_status` short-circuits the common case: `_publish_run_end`
+    (app/service.py) already ran this exact computation moments earlier,
+    inside the same invoke() call, to decide what to publish - reusing it
+    here skips a second checkpoint read + full state deserialization on
+    every request. A cache miss (nothing published, or a GET with no prior
+    invoke this request) falls back to the original fresh read."""
+    cached = service.pop_cached_status(thread_id)
+    if cached is not None:
+        return cached
     snapshot = service.get_snapshot(thread_id)
     derived = derive_status(snapshot)
     assert derived is not None  # a thread we just invoked always exists
@@ -238,49 +248,59 @@ async def stream_invoice_run(thread_id: str, request: Request) -> StreamingRespo
     """
     service = _service(request)
 
-    def _snapshot_chunks(derived: DerivedStatus):
+    def _snapshot_events(derived: DerivedStatus) -> list[events.Event]:
         response = _to_run_response(thread_id, derived)
-        yield f"id: 0\nevent: snapshot\ndata: {response.model_dump_json(exclude_none=True)}\n\n"
-        yield "id: 1\nevent: done\ndata: {}\n\n"
+        return [
+            events.Event(type="snapshot", thread_id=thread_id, seq=0, payload=response.model_dump(mode="json")),
+            events.Event(type="done", thread_id=thread_id, seq=1, payload={}),
+        ]
 
     async def _async_snapshot_chunks(derived: DerivedStatus):
-        for chunk in _snapshot_chunks(derived):
-            yield chunk
+        for event in _snapshot_events(derived):
+            yield event.to_sse()
 
     async def _channel_stream(last_event_id: int | None):
-        # A resume re-enters at human_review -> validator (unconditional
-        # edge), so a run that interrupted and was then resumed republishes
-        # a fresh validation_start/checks/interrupted-or-run_end - leaving
-        # an earlier "interrupted" sitting mid-history with more, newer
-        # events after it. Only closing the connection on the *last*
-        # replayed item (backlog_length()) - not on the first terminal-type
-        # event encountered - is what keeps a stale historical interrupt
-        # from truncating the reply before the resume's own events are
-        # sent. Any live event (arriving after the count exceeds this) is
-        # unambiguous and always closes on a terminal type, same as before.
-        expected_backlog = events.backlog_length(thread_id, last_event_id)
-        seen = 0
+        # is_current (from events.subscribe()) is False only for a backlog
+        # item something newer already supersedes - see that function's
+        # docstring for why a resumed run needs this distinction. Closing
+        # only on a *current* terminal event is what keeps a stale
+        # historical interrupt from truncating the reply before a resume's
+        # own events are sent.
         try:
-            async for item in events.subscribe(thread_id, last_event_id=last_event_id):
+            async for item, is_current in events.subscribe(thread_id, last_event_id=last_event_id):
                 if item is None:
                     yield ": keep-alive\n\n"
                     continue
-                seen += 1
                 yield item.to_sse()
-                if item.type in events.TERMINAL_EVENT_TYPES and seen >= expected_backlog:
+                if is_current and item.type in events.TERMINAL_EVENT_TYPES:
                     return
         except events.ChannelClosed:
             # Raced: the channel closed between has_channel() below and
             # attaching here (the run just finished). Fall back to the
-            # same snapshot a fresh request would get - safe to raise
-            # ThreadNotFound from inside this generator if that lookup
-            # also comes back empty, since no bytes have been sent on
-            # *this* path yet either (the caller only reaches here after
-            # has_channel() was already True, i.e. streaming has begun,
-            # but no chunk has been yielded on this specific branch).
+            # same snapshot a fresh request would get.
             derived = await run_in_threadpool(_get_derived_or_none, service, thread_id)
             if derived is None:
-                raise ThreadNotFound(f"No run found for thread_id={thread_id!r}.", thread_id=thread_id)
+                # By this point the 200 status and text/event-stream
+                # headers are already committed (StreamingResponse sends
+                # them before ever pulling from this generator) - raising
+                # ThreadNotFound here would try to send a 404 over an
+                # already-started response, producing a broken stream
+                # instead of a clean error. Degrade to a well-formed SSE
+                # frame and a clean close instead of an HTTP-level error;
+                # this exact case (the channel vanishing between the
+                # has_channel() check below and subscribe() attaching -
+                # e.g. a concurrent reserve's sweep_stale() reaping a
+                # never-started reservation) is rare, but a client should
+                # still get *something* parseable over the connection it
+                # was handed a 200 for.
+                error = events.Event(
+                    type="error",
+                    thread_id=thread_id,
+                    seq=0,
+                    payload={"code": "thread_not_found", "message": f"No run found for thread_id={thread_id!r}."},
+                )
+                yield error.to_sse()
+                return
             async for chunk in _async_snapshot_chunks(derived):
                 yield chunk
 
