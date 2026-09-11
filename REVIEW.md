@@ -349,6 +349,53 @@ instance of any of these as high-confidence, not merely plausible:
   the same line — expect to iterate against the real builder, not solve
   it from the error text alone on the first try.
 
+- **Streamed data reaching persistence.** (Phase 8.5) Any path where a
+  partially-streamed value — `invoice_agent/extract.py`'s
+  `extract_invoice_streaming`'s `on_field` callback, or anything derived
+  from it — could be written to `GraphState["invoice"]`, validated, or
+  persisted, instead of the fully-parsed `Invoice` from
+  `stream.get_final_message().parsed_output`. High severity, same class
+  as this project's core "never trust the model's raw output over the
+  deterministic validator" invariant, just one layer earlier: a live
+  preview must never become a second, less-trustworthy path to the same
+  destination the validated object already reaches.
+- **Ledger rows written without a successful invoice write.** (Phase 8.6)
+  An `invoice_exports` insert that can land when the invoice upsert
+  failed, or that runs before it — producing an audit log that disagrees
+  with the `invoices` table. The insert belongs strictly after the
+  invoice write succeeds, in the same code path, never in parallel or
+  ahead of it.
+- **Leaked event queues.** (Phase 8.5) A subscriber queue
+  (`invoice_agent/events.py`) not cleaned up on client disconnect,
+  terminal state, or a channel that's reserved but never used. Three
+  separate mechanisms cover this — `subscribe()`'s `finally` (per-
+  subscriber, on disconnect), `close_channel()` (per-channel, on a
+  terminal/interrupted event... actually only on true terminal states,
+  see the module docstring), and `sweep_stale()`'s TTL (the backstop for
+  reserved-but-abandoned or interrupted-but-never-resumed channels) — a
+  change that touches any one of the three should ask whether the other
+  two still cover what it used to. Memory leak on a 1GB box either way.
+- **The non-streaming path breaking.** (Phase 8.5) Any change to
+  `extract_invoice()` or to `ValidationResult`'s existing `passed`/
+  `flags`/`needs_review` fields that forces the eval harness
+  (`evals/run_eval.py`), MCP ingestion (`invoice_agent/ingest_mcp.py`), or
+  existing tests through a new code path they didn't opt into. The
+  concrete guard for this: `invoice_agent/graph.py`'s `extractor` node
+  only calls the streaming variant when `events.has_channel(thread_id)` is
+  true for the current run — anything that changes that condition without
+  preserving "no channel -> exactly today's non-streaming call" reopens
+  this.
+- **Artificial backend delays.** (Phase 8.5) Any `sleep`/pacing added to
+  the pipeline (extraction, validation, or the event bus) to make a
+  frontend animation look better. Pacing belongs entirely in the client —
+  Phase 9B's own plan explicitly calls this out (checks resolve in
+  milliseconds and the *client* staggers the reveal). The one thing in
+  this codebase that looks like a delay but isn't:
+  `invoice_agent/events.py`'s 15s SSE heartbeat is a `wait_for` *timeout*
+  on an otherwise-blocking idle read, not a sleep between events — a real
+  event is still forwarded the instant it arrives, so don't conflate the
+  two shapes when reviewing this file.
+
 ## Known intentional patterns — do not re-flag
 
 - `exports/invoices.csv` is an **append-only audit log**, not deduplicated

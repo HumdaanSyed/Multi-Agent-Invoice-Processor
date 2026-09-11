@@ -27,7 +27,9 @@ from anthropic import (
     PermissionDeniedError,
     RateLimitError,
 )
-from fastapi import APIRouter, File, Query, Request, Response, UploadFile
+from fastapi import APIRouter, File, Form, Query, Request, Response, UploadFile
+from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from app.errors import (
     ApiError,
@@ -35,6 +37,7 @@ from app.errors import (
     PersistenceFailed,
     RunFailed,
     ThreadNotFound,
+    UnprocessablePayload,
     UpstreamMisconfigured,
     UpstreamRateLimited,
     UpstreamUnavailable,
@@ -47,9 +50,11 @@ from app.models import (
     RunListResponse,
     RunResponse,
     RunSummary,
+    RunTicket,
 )
 from app.service import DerivedStatus, GraphService, derive_status
 from app.uploads import save_upload, sweep_old_uploads
+from invoice_agent import events
 
 router = APIRouter()
 logger = logging.getLogger("app.routes")
@@ -73,10 +78,20 @@ def _to_run_response(thread_id: str, derived: DerivedStatus) -> RunResponse:
 
 
 def _current_status(service: GraphService, thread_id: str) -> DerivedStatus:
-    """Re-reads status via get_state()/derive_status() after an invoke,
-    rather than trusting graph.invoke()'s own return value - so POST, GET,
-    and resume all build their response through the exact same path instead
-    of two subtly-different ones that could drift apart."""
+    """Status via get_state()/derive_status() after an invoke, rather than
+    trusting graph.invoke()'s own return value - so POST, GET, and resume
+    all build their response through the exact same derive_status() path
+    instead of two subtly-different ones that could drift apart.
+
+    `pop_cached_status` short-circuits the common case: `_publish_run_end`
+    (app/service.py) already ran this exact computation moments earlier,
+    inside the same invoke() call, to decide what to publish - reusing it
+    here skips a second checkpoint read + full state deserialization on
+    every request. A cache miss (nothing published, or a GET with no prior
+    invoke this request) falls back to the original fresh read."""
+    cached = service.pop_cached_status(thread_id)
+    if cached is not None:
+        return cached
     snapshot = service.get_snapshot(thread_id)
     derived = derive_status(snapshot)
     assert derived is not None  # a thread we just invoked always exists
@@ -151,13 +166,50 @@ def _translate_graph_exception(exc: Exception, thread_id: str, *, failed_node: s
     return RunFailed("An unexpected error occurred while processing this run.", thread_id=thread_id)
 
 
+@router.post("/invoices/reserve", response_model=RunTicket)
+def reserve_invoice_run(request: Request) -> RunTicket:
+    """Mint a thread_id and open its SSE channel *before* any upload or
+    graph work exists (Phase 8.5).
+
+    POST /invoices is a blocking call - by the time it returns, the run
+    (and every field/check event it would ever publish) has already
+    happened. A client that wants to watch a run live has to know the
+    thread_id, and have a stream already open, *before* that POST -
+    which is exactly what this endpoint is for. Pass the returned
+    thread_id back on POST /invoices to use it, or ignore it entirely and
+    POST without one (see that handler) - reserving is optional, not
+    required, for a client that doesn't care about live streaming.
+    """
+    service = _service(request)
+    thread_id = service.reserve()
+    return RunTicket(thread_id=thread_id, stream_url=f"/invoices/{thread_id}/stream")
+
+
 @router.post("/invoices", response_model=RunResponse)
-def create_invoice_run(request: Request, file: UploadFile = File(...)) -> RunResponse:
+def create_invoice_run(
+    request: Request, file: UploadFile = File(...), thread_id: str | None = Form(None)
+) -> RunResponse:
     service = _service(request)
     upload_dir = request.app.state.upload_dir
     sweep_old_uploads(upload_dir)
 
-    thread_id = str(uuid.uuid4())
+    if thread_id is not None:
+        # A reserved id, from POST /invoices/reserve - not client-invented.
+        # save_upload() builds a filesystem path from thread_id, so this
+        # must be a value this server minted, never an arbitrary string a
+        # caller supplies (see app/uploads.py's docstring on untrusted
+        # filenames/ids as path components). A reserved-but-unknown-to-the-
+        # checkpointer id satisfies both checks; anything else - a made-up
+        # string, or an id that's already a real run - is rejected before
+        # any file touches disk.
+        if not events.has_channel(thread_id) or derive_status(service.get_snapshot(thread_id)) is not None:
+            raise UnprocessablePayload(
+                f"thread_id={thread_id!r} was not reserved via POST /invoices/reserve, "
+                "or has already been used."
+            )
+    else:
+        thread_id = str(uuid.uuid4())
+
     pdf_path = save_upload(file, thread_id=thread_id, upload_dir=upload_dir)
 
     try:
@@ -168,6 +220,121 @@ def create_invoice_run(request: Request, file: UploadFile = File(...)) -> RunRes
         raise _translate_graph_exception(exc, thread_id, failed_node=_failed_node(service, thread_id)) from exc
 
     return _to_run_response(thread_id, _current_status(service, thread_id))
+
+
+@router.get("/invoices/{thread_id}/stream")
+async def stream_invoice_run(thread_id: str, request: Request) -> StreamingResponse:
+    """SSE feed of a run's progress - field-by-field extraction events,
+    per-check validation events, stage changes, and a terminal event.
+
+    Async (every other graph-touching handler in this module is sync, on
+    purpose - see this module's docstring) because it awaits an
+    asyncio.Queue for as long as the connection is open; it never touches
+    the graph or the checkpointer directly except via run_in_threadpool,
+    since a blocking SQLite read on the event loop would stall every other
+    concurrent request.
+
+    Three cases, all documented in docs/api.md:
+      - No channel, and the checkpointer has never heard of thread_id ->
+        404, same ThreadNotFound as GET /invoices/{thread_id}.
+      - No channel, but the run already happened (completed, or the
+        channel was swept) -> a one-shot stream: a single `snapshot`
+        event carrying the same status GET /invoices/{thread_id} would
+        return, then `done`.
+      - A channel is open -> replay its history (so a late subscriber
+        sees everything, and `Last-Event-ID` reconnects pick up where
+        they left off), then live events, until `run_end`/`interrupted`
+        closes the connection.
+    """
+    service = _service(request)
+
+    def _snapshot_events(derived: DerivedStatus) -> list[events.Event]:
+        response = _to_run_response(thread_id, derived)
+        return [
+            events.Event(type="snapshot", thread_id=thread_id, seq=0, payload=response.model_dump(mode="json")),
+            events.Event(type="done", thread_id=thread_id, seq=1, payload={}),
+        ]
+
+    async def _async_snapshot_chunks(derived: DerivedStatus):
+        for event in _snapshot_events(derived):
+            yield event.to_sse()
+
+    async def _channel_stream(last_event_id: int | None):
+        # is_current (from events.subscribe()) is False only for a backlog
+        # item something newer already supersedes - see that function's
+        # docstring for why a resumed run needs this distinction. Closing
+        # only on a *current* terminal event is what keeps a stale
+        # historical interrupt from truncating the reply before a resume's
+        # own events are sent.
+        try:
+            async for item, is_current in events.subscribe(thread_id, last_event_id=last_event_id):
+                if item is None:
+                    yield ": keep-alive\n\n"
+                    continue
+                yield item.to_sse()
+                if is_current and item.type in events.TERMINAL_EVENT_TYPES:
+                    return
+        except events.ChannelClosed:
+            # Raced: the channel closed between has_channel() below and
+            # attaching here (the run just finished). Fall back to the
+            # same snapshot a fresh request would get.
+            derived = await run_in_threadpool(_get_derived_or_none, service, thread_id)
+            if derived is None:
+                # By this point the 200 status and text/event-stream
+                # headers are already committed (StreamingResponse sends
+                # them before ever pulling from this generator) - raising
+                # ThreadNotFound here would try to send a 404 over an
+                # already-started response, producing a broken stream
+                # instead of a clean error. Degrade to a well-formed SSE
+                # frame and a clean close instead of an HTTP-level error;
+                # this exact case (the channel vanishing between the
+                # has_channel() check below and subscribe() attaching -
+                # e.g. a concurrent reserve's sweep_stale() reaping a
+                # never-started reservation) is rare, but a client should
+                # still get *something* parseable over the connection it
+                # was handed a 200 for.
+                error = events.Event(
+                    type="error",
+                    thread_id=thread_id,
+                    seq=0,
+                    payload={"code": "thread_not_found", "message": f"No run found for thread_id={thread_id!r}."},
+                )
+                yield error.to_sse()
+                return
+            async for chunk in _async_snapshot_chunks(derived):
+                yield chunk
+
+    # Resolved *before* constructing StreamingResponse - once that response
+    # exists, Starlette sends the 200 status line immediately, before ever
+    # pulling from the generator, so a 404 raised from inside the generator
+    # would arrive over an already-started response instead of a clean
+    # JSON error. Everything that can 404 is decided here, synchronously.
+    if not events.has_channel(thread_id):
+        derived = await run_in_threadpool(_get_derived_or_none, service, thread_id)
+        if derived is None:
+            raise ThreadNotFound(f"No run found for thread_id={thread_id!r}.", thread_id=thread_id)
+        generator = _async_snapshot_chunks(derived)
+    else:
+        raw_last_event_id = request.headers.get("last-event-id")
+        try:
+            last_event_id = int(raw_last_event_id) if raw_last_event_id is not None else None
+        except ValueError:
+            last_event_id = None
+        generator = _channel_stream(last_event_id)
+
+    return StreamingResponse(
+        generator,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # defeats reverse-proxy buffering (e.g. Railway's)
+        },
+    )
+
+
+def _get_derived_or_none(service: GraphService, thread_id: str) -> DerivedStatus | None:
+    return derive_status(service.get_snapshot(thread_id))
 
 
 @router.get("/invoices/{thread_id}", response_model=RunResponse)

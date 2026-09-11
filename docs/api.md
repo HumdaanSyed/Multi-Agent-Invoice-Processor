@@ -11,8 +11,10 @@ same run — a flagged invoice doesn't need to be re-uploaded to correct it.
 
 | Method | Path | Returns |
 |---|---|---|
+| `POST` | `/invoices/reserve` | Mints a `thread_id` and opens its event channel — nothing runs yet. See "Streaming" below. |
 | `POST` | `/invoices` | Uploads a PDF, runs it through the graph, blocks until it interrupts or completes. |
 | `GET` | `/invoices/{thread_id}` | Current status, read from the checkpointer — no execution. |
+| `GET` | `/invoices/{thread_id}/stream` | Server-Sent Events feed of a run's progress. See "Streaming" below. |
 | `POST` | `/invoices/{thread_id}/resume` | Submits corrections (or an empty body) and continues the run. |
 | `GET` | `/invoices` | The 20 most recent runs, newest first. |
 | `GET` | `/health` | Static liveness — zero I/O. |
@@ -84,6 +86,68 @@ validation on its final form, which is the one invariant this project
 doesn't compromise on (see `REVIEW.md`). If the duplicate is a false
 positive, correct `invoice_number` or `vendor_name` instead.
 
+## Streaming (Phase 8.5)
+
+`POST /invoices` is blocking (see above) — by the time it returns, every
+field/check event a run will ever produce has already happened. A client
+that wants to *watch* a run live, not just get its final answer, has to
+know the `thread_id` and have a stream already open **before** that POST:
+
+1. `POST /invoices/reserve` → `{thread_id, stream_url}`. This mints the id
+   and opens its event channel — no upload, no graph work yet.
+2. Open `GET {stream_url}` (i.e. `/invoices/{thread_id}/stream`,
+   `text/event-stream`).
+3. `POST /invoices` with that `thread_id` in the form body (alongside
+   `file`). The blocking call now runs with a live subscriber attached, so
+   the stream forwards events as they happen instead of only replaying
+   history afterward.
+
+Step 1 is optional — `POST /invoices` with no `thread_id` at all still
+works exactly as before (a fresh uuid is minted server-side), for a client
+that only wants the final answer.
+
+**Connecting late still works, just without a live view.** If the channel
+already closed (a straight-through completed run closes it the instant
+`POST /invoices` returns — there was never a window to watch it live
+unless streamed already), `GET .../stream` falls back to a one-shot
+`snapshot` event (the same status shape `GET /invoices/{thread_id}`
+returns) then `done`. If the channel is still open (the run interrupted,
+or hasn't started), you get every event published so far, replayed as
+history, followed by whatever comes next live.
+
+**Event types:**
+
+| Event | Payload | Meaning |
+|---|---|---|
+| `stage` | `node`, `stage` | A node started a distinct phase (`classifying`, `extracting`, `validating`, `awaiting_review`, `review_applied`, `saving`). |
+| `field` | `name`, `value` | One extracted field is readable (see the honest caveat below). |
+| `validation_start` | — | The validator is starting a fresh pass. **Discard any previously-displayed checks and start over** — a resume re-enters at `human_review -> validator` unconditionally, so every resume republishes a full new set of checks, and this is the reset signal. |
+| `check` | `check_id`, `label`, `passed`, `detail`, `skipped` | One validation rule resolved. `check_id` is a stable string (`line_items_sum`, `totals_match`, `invoice_date_valid`, `due_date_valid`, `due_date_after_invoice_date`, `not_duplicate`) — safe to key UI state/ordering off, unsafe to rename. |
+| `interrupted` | `status`, `invoice`, `flags` | The run is now `needs_review` and paused. **The channel stays open** (a resume needs somewhere to keep publishing) but **this closes the current SSE connection** — open a *new* `GET .../stream` after calling resume, don't expect the old connection to resume delivering. |
+| `run_end` | `status` | Terminal (`completed`/`skipped`/`failed`). Closes the connection and the channel. |
+| `overflow` | — | This subscriber's queue overflowed and the oldest buffered events were dropped — fall back to `GET /invoices/{thread_id}` for the authoritative current state. Can fire more than once per connection if the client falls behind, catches up, then falls behind again. |
+| `snapshot` | *(the same shape `GET /invoices/{thread_id}` returns)* | Connecting after the channel already closed — a one-shot status, not a live event. Always followed immediately by `done`. |
+| `done` | — | Closes the connection after a `snapshot`. |
+| `error` | `code`, `message` | A narrow race (the channel vanished between this route's initial check and actually attaching) left nothing to report — the 200/`text/event-stream` response was already committed by this point, so this is a best-effort in-band error rather than an HTTP-level one. Treat like `run_end`: closes the connection. |
+
+**The honest limitation:** `field` events come from a partial-JSON parse of
+Claude's in-progress structured-output stream (`invoice_agent/extract.py`'s
+`extract_invoice_streaming`) — they are a **display-only preview**. The
+`Invoice` that actually reaches validation and persistence always comes
+from the finished, fully-parsed response, never from a value handed to a
+`field` event. If the partial parse never produces anything usable, no
+`field` events fire at all, but the run still completes normally with the
+correct data — the failure mode is "no live preview," never "wrong data."
+
+**Also stated plainly, not discovered later:** the event bus
+(`invoice_agent/events.py`) is an in-memory, single-process registry — it
+only works with this project's existing single-Uvicorn-worker deployment
+(`CLAUDE.md`'s 1GB-RAM pitfall). A second worker process would maintain
+its own independent registry; a `field`/`check` event published in one
+process would never reach a subscriber connected to another. Scaling to
+multiple workers means moving this to Redis pub/sub, not adding locking —
+locking only helps threads that already share memory.
+
 ## Setup
 
 1. No new credentials — the backend reuses `ANTHROPIC_API_KEY` and
@@ -122,3 +186,6 @@ positive, correct `invoice_number` or `vendor_name` instead.
 - **No auth, no rate limiting.** The demo is intentionally public. A
   `Semaphore(2)` bounds concurrent graph runs, which is a resource limit,
   not an access control.
+- **The SSE event bus is in-memory and single-worker only** (see
+  "Streaming" above) — the same single-Uvicorn-worker constraint the
+  concurrency locks above already depend on, not a new one.

@@ -90,6 +90,25 @@ class RunListResponse(BaseModel):
     runs: list[RunSummary]
 
 
+class RunTicket(BaseModel):
+    """POST /invoices/reserve's response - a server-minted thread_id plus
+    the SSE URL to open before the actual upload (Phase 8.5).
+
+    POST /invoices is a blocking call (see app/routes.py's module
+    docstring) - it runs the whole graph before returning, so a client
+    that waits for that response to learn its thread_id can never open a
+    stream in time to see anything live, only history. Reserving the id
+    first (and opening the channel at reserve time, not on subscribe -
+    see invoice_agent/events.py) is what makes a live stream possible at
+    all. The id is always server-minted, never client-supplied - see
+    app/uploads.py's save_upload(), which builds a filesystem path from
+    thread_id.
+    """
+
+    thread_id: str
+    stream_url: str
+
+
 class ErrorResponse(BaseModel):
     """The one error shape every endpoint returns - see app/errors.py.
     `thread_id` is set on every error raised after a thread_id was minted,

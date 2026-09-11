@@ -10,7 +10,9 @@ no network. See tests/test_api_service.py.
 
 from __future__ import annotations
 
+import logging
 import threading
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Optional
@@ -28,8 +30,11 @@ from app.errors import (
     ThreadNotFound,
 )
 from app.models import InvoiceCorrections
+from invoice_agent import events
 from invoice_agent.graph import build_invoke_config
 from invoice_agent.schema import Invoice
+
+logger = logging.getLogger("app.service")
 
 DEFAULT_MAX_CONCURRENCY = 2
 SEMAPHORE_ACQUIRE_TIMEOUT = 30  # seconds
@@ -166,6 +171,15 @@ class GraphService:
         self._semaphore = threading.Semaphore(max_concurrency)
         self._thread_locks: dict[str, threading.Lock] = {}
         self._thread_locks_guard = threading.Lock()
+        # One-shot cache from _publish_run_end to the route handler that
+        # called start_run/resume_run, so the DerivedStatus computed to
+        # decide what to publish doesn't get computed a second time (a
+        # second get_snapshot() + derive_status() - a full checkpoint read
+        # and deserialization) moments later to build the HTTP response.
+        # Written under the per-thread_id lock in _guarded_invoke, popped
+        # (not just read) by pop_cached_status so a stale entry can never
+        # be served to an unrelated later request for the same thread_id.
+        self._last_derived: dict[str, DerivedStatus] = {}
 
     def _lock_for(self, thread_id: str) -> threading.Lock:
         # One Lock object per thread_id ever seen, kept for the process's
@@ -214,6 +228,67 @@ class GraphService:
     def get_snapshot(self, thread_id: str) -> StateSnapshot:
         return self._graph.get_state(build_invoke_config(thread_id))
 
+    def pop_cached_status(self, thread_id: str) -> Optional[DerivedStatus]:
+        """Consume the DerivedStatus _publish_run_end computed for
+        thread_id's most recent invoke() call, if any. Returns None on a
+        cache miss (nothing published this run - e.g. _publish_run_end's
+        own guard swallowed an error) so the caller can fall back to a
+        fresh get_snapshot()/derive_status() exactly as before."""
+        return self._last_derived.pop(thread_id, None)
+
+    def reserve(self) -> str:
+        """Mint a thread_id and open its event channel *before* any graph
+        work exists (Phase 8.5) - see app/models.py's RunTicket docstring
+        for why POST /invoices being blocking forces this two-step shape.
+
+        Sweeps stale channels first (same opportunistic pattern as
+        app/uploads.py's sweep_old_uploads at the top of POST /invoices),
+        so a burst of abandoned reservations doesn't itself exhaust the
+        channel cap for the next real one.
+        """
+        events.sweep_stale()
+        thread_id = str(uuid.uuid4())
+        if not events.open_channel(thread_id):
+            raise ServerBusy(
+                "Too many streams are open right now - please retry shortly.",
+                retry_after=30,
+            )
+        return thread_id
+
+    def _publish_run_end(self, thread_id: str) -> None:
+        """Publish the one terminal-or-interrupted event for this
+        invoke() call, in the *same* `finally` that wraps it, re-deriving
+        status through `derive_status` - the identical function the HTTP
+        response is built from, so the stream and the REST response can
+        never disagree.
+
+        Guarded end-to-end: a bus-side failure here must never mask the
+        real exception propagating out of graph.invoke() (REVIEW.md's
+        "unguarded optional-integration call in a path that must never
+        hard-fail" pattern - both ends of it, same as invoice_agent/tracing.py).
+        """
+        try:
+            derived = derive_status(self.get_snapshot(thread_id))
+        except Exception:  # noqa: BLE001 - diagnostic bus, never the primary error path
+            logger.debug("Could not derive status to publish run-end for thread_id=%s", thread_id, exc_info=True)
+            return
+        if derived is None:
+            return
+        self._last_derived[thread_id] = derived
+        try:
+            if derived.status == "needs_review":
+                events.publish(
+                    thread_id, "interrupted", status=derived.status, invoice=derived.invoice, flags=derived.flags
+                )
+            elif derived.status in ("completed", "skipped", "failed"):
+                events.publish(thread_id, "run_end", status=derived.status)
+                events.close_channel(thread_id)
+            # "processing" is unreachable here (this only runs after an
+            # invoke() call returns or raises) - publish nothing rather
+            # than guess.
+        except Exception:  # noqa: BLE001 - see docstring
+            logger.debug("Failed publishing run-end event for thread_id=%s", thread_id, exc_info=True)
+
     def start_run(self, thread_id: str, file_path: str) -> dict:
         initial_state = {
             "file_path": file_path,
@@ -224,7 +299,10 @@ class GraphService:
             "messages": [],
         }
         with self._guarded_invoke(thread_id):
-            return self._graph.invoke(initial_state, config=build_invoke_config(thread_id))
+            try:
+                return self._graph.invoke(initial_state, config=build_invoke_config(thread_id))
+            finally:
+                self._publish_run_end(thread_id)
 
     def resume_run(self, thread_id: str, corrections: InvoiceCorrections) -> dict:
         snapshot = self.get_snapshot(thread_id)
@@ -258,8 +336,19 @@ class GraphService:
                 thread_id=thread_id,
             )
 
+        # Re-open the channel for the resume pass - the interrupting call's
+        # channel is still open in the common case (see
+        # invoice_agent/events.py: an interrupt never closes it), but this
+        # makes resuming a thread whose channel was swept for inactivity
+        # (or one that started via scripts/run_graph.py, never reserved)
+        # start streaming from here on regardless, rather than silently
+        # staying unstreamed. Idempotent - a no-op if already open.
+        events.open_channel(thread_id)
         with self._guarded_invoke(thread_id):
-            return self._graph.invoke(command, config=build_invoke_config(thread_id))
+            try:
+                return self._graph.invoke(command, config=build_invoke_config(thread_id))
+            finally:
+                self._publish_run_end(thread_id)
 
     def list_runs(self, limit: int = 20, overfetch: int = 200) -> list[DerivedStatus | dict]:
         """Recent runs, newest first, deduped by thread_id.
