@@ -152,14 +152,15 @@ def build_corrections(
 def invoice_to_csv_bytes(invoice: dict) -> bytes:
     """A single-invoice CSV, generated client-side.
 
-    The backend's own CSV export (`db.export_invoice_csv`) writes to a
-    server-side file (`exports/invoices.csv`) a separately-deployed
-    frontend container (Phase 10) has no filesystem access to, and it
-    appends to a running multi-invoice log rather than producing a
-    one-invoice download - a different job entirely. Row assembly itself
-    is shared with `export_invoice_csv` via `db.invoice_csv_rows()`, so
-    this download's schema can't silently drift from the server-side
-    export's - only the "how/where to write it" differs.
+    The backend's own export (Phase 8.6, `GET /export.csv`) serves the
+    full, durable `invoice_exports` Postgres ledger - every successful
+    write ever persisted, not just this one - which a separately-deployed
+    frontend container (Phase 10) would have to make a network call for.
+    Row assembly itself is shared with the ledger's own CSV output via
+    `db.invoice_csv_rows()`, so this download's schema can't silently
+    drift from the server-side export's - only the "one invoice, no
+    network call" vs. "every invoice ever, straight from Postgres" scope
+    differs.
     """
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=db.CSV_FIELDS)

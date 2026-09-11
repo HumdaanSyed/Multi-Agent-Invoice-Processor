@@ -31,8 +31,6 @@ from invoice_agent.extract import extract_invoice, extract_invoice_streaming
 from invoice_agent.tracing import trace_callbacks, traced_generation
 from invoice_agent.validate import validate_invoice
 
-EXPORT_CSV_PATH = Path(__file__).resolve().parent.parent / "exports" / "invoices.csv"
-
 DocType = Literal["invoice", "receipt", "other"]
 
 
@@ -222,20 +220,27 @@ def human_review(state: GraphState, config: Optional[RunnableConfig] = None) -> 
 
 def output(state: GraphState, config: Optional[RunnableConfig] = None) -> dict:
     """Persist the invoice: upload the source PDF, upsert to Supabase (with
-    the resulting storage path), and append the CSV export."""
+    the resulting storage path), and append a row to the export ledger.
+
+    The ledger insert runs strictly *after* insert_invoice succeeds, in
+    the same try block, never before or in parallel (REVIEW.md: "ledger
+    rows written without a successful invoice write") - an invoice must
+    never appear in the ledger unless it was actually persisted.
+    """
     _publish(config, "stage", node="output", stage="saving")
     invoice = state["invoice"]
     pdf_storage_path = None
     try:
         pdf_storage_path = db.upload_pdf(state["file_path"])
         db.insert_invoice({**invoice, "pdf_storage_path": pdf_storage_path})
-        db.export_invoice_csv(invoice, EXPORT_CSV_PATH)
+        db.insert_export_row(_thread_id(config) or "", invoice)
     except Exception as exc:
         raise RuntimeError(
             f"output failed persisting vendor={invoice.get('vendor_name')!r} "
             f"invoice_number={invoice.get('invoice_number')!r} "
             f"(pdf_storage_path={pdf_storage_path!r} - already uploaded if set): {exc}"
         ) from exc
+    _publish(config, "ledger", status="written")
     return {"status": "completed"}
 
 

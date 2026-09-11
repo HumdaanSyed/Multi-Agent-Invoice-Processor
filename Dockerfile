@@ -77,28 +77,29 @@ COPY --from=builder --chown=app:app /app/frontend ./frontend
 COPY --from=builder --chown=app:app /app/data/eval ./data/eval
 
 # Runtime state dirs. App code already creates these lazily
-# (mkdir(parents=True, exist_ok=True) in app/main.py, app/uploads.py,
-# invoice_agent/db.py) - that's for local/non-root-agnostic dev, but it's
-# not enough on its own here: checkpoints/uploads/exports must exist
-# *before* docker-compose.yml's named volumes mount over them, or Docker
-# auto-creates those mount-point directories itself, owned by root - and
-# a non-root process can't create a file under a root-owned directory
-# (this exact regression: dropping this mkdir in favor of chown alone
-# broke `docker compose up` with `sqlite3.OperationalError: unable to
-# open database file`, since chown has nothing to chown until the
-# directory exists). So both steps are needed: mkdir creates them (giving
-# each volume mount an existing, image-owned directory to copy ownership
-# from on first mount), then chown -R covers the whole /app tree - not
-# just these three - so any other mkdir(parents=True) call elsewhere in
-# the codebase (the MCP ingestion modules under
-# invoice_agent/mcp_servers/) also lands somewhere app-writable without
-# needing a matching edit here.
+# (mkdir(parents=True, exist_ok=True) in app/main.py, app/uploads.py) -
+# that's for local/non-root-agnostic dev, but it's not enough on its own
+# here: checkpoints/uploads must exist *before* docker-compose.yml's named
+# volumes mount over them, or Docker auto-creates those mount-point
+# directories itself, owned by root - and a non-root process can't create
+# a file under a root-owned directory (this exact regression: dropping
+# this mkdir in favor of chown alone broke `docker compose up` with
+# `sqlite3.OperationalError: unable to open database file`, since chown
+# has nothing to chown until the directory exists). So both steps are
+# needed: mkdir creates them (giving each volume mount an existing,
+# image-owned directory to copy ownership from on first mount), then
+# chown -R covers the whole /app tree - not just these two - so any other
+# mkdir(parents=True) call elsewhere in the codebase (the MCP ingestion
+# modules under invoice_agent/mcp_servers/) also lands somewhere
+# app-writable without needing a matching edit here. (No `exports/` here
+# any more - Phase 8.6 replaced the local CSV export with a Postgres
+# ledger, so there's no longer any local export state to pre-create.)
 # /data is also pre-created: it's not used by anything in this image, but
 # it's the conventional mount point cloud platforms (Railway) put a
 # persistent volume at - pre-chowning it here means a fresh volume
 # mounted there on first boot inherits app-writable ownership instead of
 # staying root-owned (see deploy/railway.md).
-RUN mkdir -p checkpoints uploads exports /data \
+RUN mkdir -p checkpoints uploads /data \
     && chown -R app:app /app /data
 
 ENV PATH="/app/.venv/bin:$PATH" \

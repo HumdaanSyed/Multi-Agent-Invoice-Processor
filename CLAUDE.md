@@ -47,7 +47,7 @@ Every `graph.invoke()` is traced via `invoice_agent/tracing.py` (optional — no
 - `docker compose up` — run full stack in containers
 
 ## Current Phase
-Phase 8.5: Streaming backend (docs/FRONTEND_PLAN.md) — SSE field/check/stage events, the `invoice_agent/events.py` bus, and `POST /invoices/reserve` are built and tested; not yet committed/merged. This phase (and 8.6 after it) precede the Next.js ("Verity") frontend rebuild that replaces the original Phase 9 — see docs/FRONTEND_PLAN.md for the full revised plan. Phase 10 (Dockerize + deploy) is live on Railway.
+Phase 8.6: Export ledger (docs/FRONTEND_PLAN.md) — the local `exports/invoices.csv` file is replaced by an append-only `invoice_exports` Postgres table (`db/schema.sql`), `GET /export.csv` and `GET /export/status`. Built and tested; **not yet applied to the live Supabase project** — run `db/schema.sql`'s new `invoice_exports` table/index statements in the Supabase SQL editor before this works outside the test suite. Phase 8.5 (streaming backend) is merged. Both precede the Next.js ("Verity") frontend rebuild that replaces the original Phase 9 — see docs/FRONTEND_PLAN.md for the full revised plan. Phase 10 (Dockerize + deploy) is live on Railway.
 
 ## Roadmap
 The full 11-phase build plan lives in `docs/ROADMAP.md` (not auto-loaded here, it's long). At the start of a session working on a new phase, say: "Read docs/ROADMAP.md, we're on Phase 10, implement it."

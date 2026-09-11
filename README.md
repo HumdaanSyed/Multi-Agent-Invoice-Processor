@@ -45,7 +45,7 @@ flowchart TD
         E["Validator<br/>plain Python: math, dates, duplicates"]
         F{{"needs_review?"}}
         G["Human Review<br/>interrupt() — edit fields, resume"]
-        H["Output<br/>upsert + upload + CSV export"]
+        H["Output<br/>upsert + upload + ledger row"]
 
         C -- "invoice" --> D
         C -- "receipt / other" --> END1(["end — routed out"])
@@ -57,7 +57,7 @@ flowchart TD
     end
 
     H --> I[("Supabase<br/>Postgres + Storage")]
-    H --> J["exports/invoices.csv"]
+    H --> J[("invoice_exports ledger<br/>→ GET /export.csv")]
 
     Pipeline -.->|"every node + both raw Claude calls"| K["Langfuse<br/>trace per run"]
 
@@ -164,7 +164,6 @@ uv run pytest
 - **No authentication.** Both the API and the Streamlit UI are open to anyone with the URL. A real deployment needs auth, rate limiting, and per-user data isolation before it touches anyone else's documents.
 - **Single-model extraction.** Everything currently runs on `claude-sonnet-5`; routing simple invoices to a cheaper/faster model and hard scanned documents to a stronger one (mentioned as a design goal) isn't wired up yet — there's no signal in production to route on until this runs against a larger, messier real-world sample.
 - **Gmail ingestion is local-only.** MCP's `stdio` transport can't run inside the deployed backend — pulling from Gmail today means running `python -m invoice_agent.ingest_mcp --source gmail` from a machine you control (a cron job, not automatic). An HTTP-transport MCP server would close this gap.
-- **`exports/invoices.csv` doesn't survive a redeploy** on either cloud target — it's an append-only audit log with no persistent-volume wiring today (documented in both deploy guides, not hidden).
 - **No retries/idempotency around the two live API calls** (router, extractor) beyond what the Anthropic SDK does internally — a transient failure mid-run surfaces as a failed run, not an automatic retry.
 - **Eval set is synthetic, single-renderer.** See the caveat under [Eval results](#eval-results) — this measures whether the pipeline is internally consistent, not real-world extraction accuracy across arbitrary invoice layouts.
 - **No PII handling.** Real invoices contain names, addresses, sometimes bank details — nothing here redacts, encrypts at rest beyond Supabase's defaults, or enforces retention limits.

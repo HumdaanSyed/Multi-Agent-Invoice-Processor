@@ -14,6 +14,8 @@ reason not to stay on the event loop.
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import uuid
 
@@ -44,6 +46,7 @@ from app.errors import (
 )
 from app.health import check_readiness
 from app.models import (
+    ExportStatusResponse,
     HealthResponse,
     ReadinessResponse,
     ResumeRequest,
@@ -54,7 +57,7 @@ from app.models import (
 )
 from app.service import DerivedStatus, GraphService, derive_status
 from app.uploads import save_upload, sweep_old_uploads
-from invoice_agent import events
+from invoice_agent import db, events
 
 router = APIRouter()
 logger = logging.getLogger("app.routes")
@@ -365,6 +368,66 @@ def list_invoice_runs(request: Request, limit: int = Query(20, ge=1, le=100)) ->
     service = _service(request)
     rows = service.list_runs(limit=limit)
     return RunListResponse(runs=[RunSummary(**row) for row in rows])
+
+
+def _export_csv_chunks():
+    """Sync generator, streamed via StreamingResponse's automatic
+    threadpool wrapping (Starlette wraps any non-async-iterable content
+    with `iterate_in_threadpool`) - consistent with every other Supabase-
+    touching handler in this module being a plain sync `def`. Builds one
+    CSV line per DictWriter call via a reused StringIO buffer, so the
+    ledger is never held in memory as a single string (the 1GB-RAM
+    constraint this project targets) no matter how many rows it has -
+    `db.iter_export_rows()` itself pages through Supabase rather than
+    fetching everything in one call.
+    """
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=db.LEDGER_CSV_FIELDS)
+
+    writer.writeheader()
+    yield buffer.getvalue()
+    buffer.seek(0)
+    buffer.truncate(0)
+
+    try:
+        for ledger_row in db.iter_export_rows():
+            for csv_row in db.export_ledger_row_to_csv_rows(ledger_row):
+                writer.writerow(csv_row)
+                yield buffer.getvalue()
+                buffer.seek(0)
+                buffer.truncate(0)
+    except Exception:
+        # The 200 status and text/csv headers are already committed by
+        # this point (StreamingResponse sends them before ever pulling
+        # from this generator - same reasoning as stream_invoice_run's
+        # ChannelClosed handling above), so a mid-stream Supabase failure
+        # would otherwise abort the response with no indication anything
+        # went wrong - a client sees what looks like a header-only, empty
+        # ledger instead of a truncated download. Log the real exception
+        # server-side and surface a visible marker in-band instead.
+        logger.exception("GET /export.csv failed partway through streaming the ledger")
+        yield "\r\n# ERROR: export truncated - see server logs\r\n"
+
+
+@router.get("/export.csv")
+def download_export_csv() -> StreamingResponse:
+    """The full export ledger, ordered oldest-first, as a CSV download -
+    every successful invoice write ever persisted, including every
+    corrected re-run as its own row (the ledger is append-only, never
+    deduplicated - see REVIEW.md)."""
+    return StreamingResponse(
+        _export_csv_chunks(),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="invoices.csv"'},
+    )
+
+
+@router.get("/export/status", response_model=ExportStatusResponse)
+def export_status() -> ExportStatusResponse:
+    """Row count and freshness of the export ledger, for a persistent
+    "N invoices exported" UI element that doesn't need to download the
+    whole CSV just to show that."""
+    return ExportStatusResponse(**db.export_status())
 
 
 @router.get("/health", response_model=HealthResponse)

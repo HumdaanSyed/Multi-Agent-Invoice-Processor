@@ -95,11 +95,6 @@ instead of a box you fully control.
   service until you manually hit Redeploy (or wire up a Railway API call
   in the CI workflow, not set up here). Same limitation `deploy/ec2.md`
   documents for the EC2 box.
-- **`exports/invoices.csv` has no env-var override** (unlike checkpoints/
-  uploads — see `invoice_agent/graph.py`'s `EXPORT_CSV_PATH`), so it's
-  **not** on the volume and is lost on every redeploy. Fine for a demo;
-  a real deployment would want this fixed at the code level, not worked
-  around here.
 - **One Railway Volume per service** — if you ever split `checkpoints/`
   and `uploads/` onto genuinely separate physical concerns, that needs
   two services or an external object store, not two volumes on one.

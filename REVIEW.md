@@ -39,7 +39,7 @@ reaches persistence must have actually passed `validate_invoice()` on its
 *final* form — not the form it had before a human correction.
 
 Flag, at high severity, any change where:
-- Data reaches `db.insert_invoice` / `db.export_invoice_csv` (or any future
+- Data reaches `db.insert_invoice` / `db.insert_export_row` (or any future
   persistence call) without having gone through `validator` immediately
   before it, on the exact data being persisted.
 - A human-in-the-loop correction (`human_review`'s `edited_invoice`) can
@@ -396,12 +396,34 @@ instance of any of these as high-confidence, not merely plausible:
   event is still forwarded the instant it arrives, so don't conflate the
   two shapes when reviewing this file.
 
+- **An exception raised from inside a generator after `StreamingResponse`
+  has already sent the HTTP status and headers.** Starlette's
+  `StreamingResponse.stream_response` sends `http.response.start` *before*
+  ever pulling the first chunk from its body iterator - by the time any
+  code inside that generator raises, the response is already committed,
+  so what should be a clean error becomes a broken/truncated stream
+  instead. Bit us twice, same underlying shape both times: `app/routes.py`
+  `stream_invoice_run` (Phase 8.5 review) raising `ThreadNotFound` from a
+  narrow `ChannelClosed` race, and `GET /export.csv`'s `_export_csv_chunks`
+  (Phase 8.6, caught live rather than by review - `db.iter_export_rows()`
+  hit a real Supabase error mid-stream and the client silently got a
+  header-only "empty ledger" instead of any indication something failed).
+  Fixed the same way both times: never raise from inside a streaming
+  generator once it may have already yielded a chunk - catch the failure,
+  log the real exception server-side (`logger.exception`), and yield an
+  in-band marker (an SSE `error` event; a trailing `# ERROR: ...` CSV
+  comment line) instead. Check *every* streaming/`StreamingResponse`
+  endpoint for this, not just the two already fixed - the pattern repeats
+  wherever a generator does I/O that can fail after its first `yield`.
+
 ## Known intentional patterns — do not re-flag
 
-- `exports/invoices.csv` is an **append-only audit log**, not deduplicated
-  like the `invoices` table. Re-running/correcting the same invoice
-  intentionally adds another CSV row. This is a feature, not a duplicate-data
-  bug.
+- The `invoice_exports` Postgres table (Phase 8.6, replacing the earlier
+  local `exports/invoices.csv` file) is an **append-only audit log**, not
+  deduplicated like the `invoices` table - no unique constraint, by design
+  (`db/schema.sql`). Re-running/correcting the same invoice intentionally
+  adds another ledger row via `db.insert_export_row`, never an upsert.
+  This is a feature, not a duplicate-data bug.
 - `validate_invoice()`'s `duplicate_checker` parameter defaults to `None`
   (no-op) so unit tests stay offline and deterministic. Production wiring to
   `db.is_duplicate` happens in `graph.py`'s `validator` node, and that wiring

@@ -66,7 +66,6 @@ build on the box.
        volumes:
          - checkpoint_data:/app/checkpoints
          - upload_data:/app/uploads
-         - export_data:/app/exports
        restart: unless-stopped
 
      frontend:
@@ -94,7 +93,6 @@ build on the box.
    volumes:
      checkpoint_data:
      upload_data:
-     export_data:
    EOF
    ```
    Replace `<owner>` with the lowercased GitHub owner (`humdaansyed`).
