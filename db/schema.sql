@@ -71,6 +71,26 @@ create table if not exists invoice_exports (
     line_items jsonb not null default '[]'::jsonb
 );
 
--- GET /export.csv orders by written_at; GET /export/status wants the most
--- recent row cheaply.
+-- GET /export/status wants the most recent row cheaply; GET /export.csv
+-- itself paginates by keyset on the primary key, not this column (see
+-- invoice_agent/db.py's iter_export_rows), to stay stable under concurrent
+-- inserts.
 create index if not exists idx_invoice_exports_written_at on invoice_exports (written_at);
+
+-- Enforce "append-only" in the database, not just in the comment above and
+-- in application code - insert_invoice's own upsert-on-conflict pattern
+-- (above) is the natural thing for a future contributor or migration
+-- script to reach for here too, and there's no unique constraint on this
+-- table to make an accidental update/upsert fail loudly.
+create or replace function reject_invoice_exports_mutation()
+returns trigger as $$
+begin
+    raise exception 'invoice_exports is append-only - % is not allowed', tg_op;
+end;
+$$ language plpgsql;
+
+drop trigger if exists invoice_exports_append_only on invoice_exports;
+create trigger invoice_exports_append_only
+    before update or delete on invoice_exports
+    for each row
+    execute function reject_invoice_exports_mutation();

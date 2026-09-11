@@ -146,8 +146,11 @@ def invoice_csv_rows(invoice: dict) -> list[dict]:
 
 # The ledger's own CSV shape - written_at/thread_id first (provenance a
 # plain per-invoice dump never had), then the same per-line-item columns
-# CSV_FIELDS already defines, so the two field lists can't drift apart.
-LEDGER_CSV_FIELDS = ["written_at", "thread_id"] + CSV_FIELDS
+# CSV_FIELDS already defines. Single source of truth for the provenance
+# columns too - export_ledger_row_to_csv_rows() below builds its
+# provenance dict from this same list, so the two can't drift apart.
+_LEDGER_PROVENANCE_FIELDS = ["written_at", "thread_id"]
+LEDGER_CSV_FIELDS = _LEDGER_PROVENANCE_FIELDS + CSV_FIELDS
 
 
 def insert_export_row(thread_id: str, invoice: dict) -> dict:
@@ -176,15 +179,29 @@ def iter_export_rows(page_size: int = 500) -> Iterator[dict]:
     once (the 1GB-RAM constraint this project targets) and never silently
     truncates at PostgREST's default row cap the way one unpaginated
     `select("*")` would on a large ledger.
+
+    Paginates by keyset on `id` (the identity primary key - unique and
+    assigned in commit order) rather than offset/range on `written_at`.
+    `written_at` is assigned at statement-execution time, not commit time,
+    so two concurrent `insert_export_row` calls can tie or commit out of
+    that order; combined with offset/range pagination (which re-derives
+    "page N" by counting from row zero on every call), a row inserted
+    while a long-lived `GET /export.csv` download is still in progress
+    would shift every later offset and cause a row to be skipped or
+    duplicated in the stream. A keyset cursor has no such drift: each page
+    only asks for ids strictly greater than the last one seen, so rows
+    inserted concurrently elsewhere in the table never move already-issued
+    pages around.
     """
     client = get_client()
-    offset = 0
+    last_id = 0
     while True:
         response = (
             client.table("invoice_exports")
             .select("*")
-            .order("written_at")
-            .range(offset, offset + page_size - 1)
+            .gt("id", last_id)
+            .order("id")
+            .limit(page_size)
             .execute()
         )
         rows = response.data
@@ -193,7 +210,7 @@ def iter_export_rows(page_size: int = 500) -> Iterator[dict]:
         yield from rows
         if len(rows) < page_size:
             return
-        offset += page_size
+        last_id = rows[-1]["id"]
 
 
 def export_ledger_row_to_csv_rows(ledger_row: dict) -> list[dict]:
@@ -202,7 +219,7 @@ def export_ledger_row_to_csv_rows(ledger_row: dict) -> list[dict]:
     per-line-item flattening (a ledger row already has every key that
     function reads: the header fields plus `line_items`), so the two
     outputs can't drift apart in row shape."""
-    provenance = {"written_at": ledger_row.get("written_at"), "thread_id": ledger_row.get("thread_id")}
+    provenance = {field: ledger_row.get(field) for field in _LEDGER_PROVENANCE_FIELDS}
     return [{**provenance, **row} for row in invoice_csv_rows(ledger_row)]
 
 
@@ -210,7 +227,10 @@ def export_status() -> dict[str, Any]:
     """Row count and the most recent `written_at`, for the persistent
     export bar (`GET /export/status`)."""
     client = get_client()
-    count_response = client.table("invoice_exports").select("id", count="exact").execute()
+    # head=True turns this into a HEAD request - PostgREST still returns the
+    # exact count via Content-Range, but without it a plain GET would return
+    # every matching row's `id` in the body just to have it discarded below.
+    count_response = client.table("invoice_exports").select("id", count="exact", head=True).execute()
     row_count = count_response.count or 0
 
     last_response = (

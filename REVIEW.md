@@ -411,10 +411,16 @@ instance of any of these as high-confidence, not merely plausible:
   Fixed the same way both times: never raise from inside a streaming
   generator once it may have already yielded a chunk - catch the failure,
   log the real exception server-side (`logger.exception`), and yield an
-  in-band marker (an SSE `error` event; a trailing `# ERROR: ...` CSV
-  comment line) instead. Check *every* streaming/`StreamingResponse`
-  endpoint for this, not just the two already fixed - the pattern repeats
-  wherever a generator does I/O that can fail after its first `yield`.
+  in-band marker instead (an SSE `error` event; a trailing CSV row flagged
+  in its first column - **not** a `#`-prefixed comment line, which RFC
+  4180 has no concept of and which pandas/`csv.DictReader` would silently
+  misparse as a malformed data row rather than recognize as an error).
+  The CSV side of this is now centralized in `app/routes.py`'s
+  `_stream_csv_rows()` rather than a one-off try/except, so the next
+  Supabase-backed CSV export gets the marker-row shape for free - the SSE
+  side still needs its own handling per endpoint (its recovery semantics
+  differ per event type), so check any *new* streaming/`StreamingResponse`
+  endpoint for this rather than assuming it's covered.
 
 ## Known intentional patterns — do not re-flag
 
@@ -423,7 +429,17 @@ instance of any of these as high-confidence, not merely plausible:
   deduplicated like the `invoices` table - no unique constraint, by design
   (`db/schema.sql`). Re-running/correcting the same invoice intentionally
   adds another ledger row via `db.insert_export_row`, never an upsert.
-  This is a feature, not a duplicate-data bug.
+  This is a feature, not a duplicate-data bug. The append-only invariant
+  is now also enforced by a `before update or delete` trigger on the table
+  itself (`reject_invoice_exports_mutation` in `db/schema.sql`), not just
+  by the absence of a unique constraint and this note.
+- `invoice_agent/graph.py`'s `output()` node treats a failed
+  `db.insert_export_row` as non-fatal: it's logged and published as a
+  `ledger` SSE event with `status="failed"`, but the run still completes,
+  since `insert_invoice` (the invoice's actual system of record) already
+  succeeded by that point. Don't flag a `RuntimeError` *not* being raised
+  here as a swallowed error - the invoice write and the ledger write are
+  deliberately not coupled into one failure mode.
 - `validate_invoice()`'s `duplicate_checker` parameter defaults to `None`
   (no-op) so unit tests stay offline and deterministic. Production wiring to
   `db.is_duplicate` happens in `graph.py`'s `validator` node, and that wiring

@@ -370,6 +370,37 @@ def list_invoice_runs(request: Request, limit: int = Query(20, ge=1, le=100)) ->
     return RunListResponse(runs=[RunSummary(**row) for row in rows])
 
 
+def _stream_csv_rows(rows, writer: "csv.DictWriter", buffer: io.StringIO, error_row: dict):
+    """Shared shape for streaming DictWriter rows as they're produced, with
+    a failure mid-iteration caught and reported in-band rather than left to
+    abort the response. Reuse this for the next Supabase-backed CSV export
+    instead of re-copying the try/except.
+
+    By the time any caller of this generator is pulling from it, the 200
+    status and `text/csv` headers are already committed (StreamingResponse
+    sends them before ever pulling the first chunk - same reasoning as
+    stream_invoice_run's `ChannelClosed` handling for the SSE side of this
+    problem, documented in REVIEW.md), so a mid-stream failure can only be
+    caught and reported in-band - it can never become a clean HTTP error.
+    `error_row` must already be shaped as a valid row for `writer` (every
+    fieldname present) - not a raw string - so it round-trips through
+    ordinary CSV readers as one extra, clearly-flagged row instead of a
+    "#"-prefixed comment line, which RFC 4180 has no concept of and which
+    pandas/csv.DictReader would otherwise silently misparse as a malformed
+    data row.
+    """
+    try:
+        for row in rows:
+            writer.writerow(row)
+            yield buffer.getvalue()
+            buffer.seek(0)
+            buffer.truncate(0)
+    except Exception:
+        logger.exception("CSV export failed partway through streaming")
+        writer.writerow(error_row)
+        yield buffer.getvalue()
+
+
 def _export_csv_chunks():
     """Sync generator, streamed via StreamingResponse's automatic
     threadpool wrapping (Starlette wraps any non-async-iterable content
@@ -389,24 +420,13 @@ def _export_csv_chunks():
     buffer.seek(0)
     buffer.truncate(0)
 
-    try:
+    def _ledger_csv_rows():
         for ledger_row in db.iter_export_rows():
-            for csv_row in db.export_ledger_row_to_csv_rows(ledger_row):
-                writer.writerow(csv_row)
-                yield buffer.getvalue()
-                buffer.seek(0)
-                buffer.truncate(0)
-    except Exception:
-        # The 200 status and text/csv headers are already committed by
-        # this point (StreamingResponse sends them before ever pulling
-        # from this generator - same reasoning as stream_invoice_run's
-        # ChannelClosed handling above), so a mid-stream Supabase failure
-        # would otherwise abort the response with no indication anything
-        # went wrong - a client sees what looks like a header-only, empty
-        # ledger instead of a truncated download. Log the real exception
-        # server-side and surface a visible marker in-band instead.
-        logger.exception("GET /export.csv failed partway through streaming the ledger")
-        yield "\r\n# ERROR: export truncated - see server logs\r\n"
+            yield from db.export_ledger_row_to_csv_rows(ledger_row)
+
+    error_row = dict.fromkeys(db.LEDGER_CSV_FIELDS, "")
+    error_row[db.LEDGER_CSV_FIELDS[0]] = "ERROR: export truncated - see server logs"
+    yield from _stream_csv_rows(_ledger_csv_rows(), writer, buffer, error_row)
 
 
 @router.get("/export.csv")
