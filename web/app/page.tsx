@@ -1,3 +1,4 @@
+import { UploadZone } from "@/components/upload-zone";
 import { getHealth } from "@/lib/api";
 import { API_BASE_URL, PRODUCT_TAGLINE } from "@/lib/config";
 
@@ -28,14 +29,17 @@ export default async function Home() {
     <div className="flex flex-col gap-10">
       <p className="max-w-prose text-lg text-text-muted">{PRODUCT_TAGLINE}</p>
 
-      <div className="rounded-lg border border-border bg-surface p-6">
-        <p className="text-sm text-text-muted">
-          Backend ({API_BASE_URL}):{" "}
-          <span className={backendOk ? "text-ok" : "text-error"}>
-            {backendOk ? "connected" : "unreachable"}
-          </span>
-        </p>
-      </div>
+      <UploadZone />
+
+      {!backendOk && (
+        <div className="rounded-lg border border-border bg-surface p-6">
+          <p className="text-sm text-text-muted">
+            Backend ({API_BASE_URL}): <span className="text-error">unreachable</span>
+          </p>
+        </div>
+      )}
+
+      {/* Recent runs list - Phase 9D (docs/FRONTEND_PLAN.md). */}
     </div>
   );
 }

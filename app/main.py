@@ -71,21 +71,30 @@ def create_app(*, checkpointer: Optional[BaseCheckpointSaver] = None, load_env: 
     app/service.py's `GraphService` docstring for why: two SqliteSaver
     instances over two connections have two different internal locks).
 
-    `load_env`: whether the lifespan calls `load_dotenv()`. False for tests
-    - `TestClient(app)` runs the lifespan as a context manager, and this
-    repo's `.env` holds real credentials; a test that doesn't need them must
-    not pull them into `os.environ`.
+    `load_env`: whether this function calls `load_dotenv()` before building
+    the app. False for tests - `TestClient(app)` runs the lifespan as a
+    context manager, and this repo's `.env` holds real credentials; a test
+    that doesn't need them must not pull them into `os.environ`.
     """
+    if load_env:
+        # Must happen here, before _cors_origins() is read below - not
+        # inside the lifespan, which only runs once the ASGI server starts
+        # serving. app.add_middleware(CORSMiddleware, ...) reads
+        # os.environ at import/construction time (this function's own
+        # call), so a CORS_ALLOW_ORIGINS set only in .env (never exported
+        # into the real shell environment) was silently ignored - the
+        # process's own os.environ.get() saw nothing until load_dotenv()
+        # ran, which was already too late to affect the CORS middleware
+        # built moments earlier.
+        from dotenv import load_dotenv
+
+        load_dotenv()
+
     owns_connection = checkpointer is None
     state: dict = {}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        if load_env:
-            from dotenv import load_dotenv
-
-            load_dotenv()
-
         # Bind the loop this lifespan is itself running on, so
         # invoice_agent/events.py's publish() (called from graph nodes on
         # a worker thread - see app/service.py's module docstring) can

@@ -77,6 +77,23 @@ instance of any of these as high-confidence, not merely plausible:
 - **Import-time side effects.** Module import must not touch the
   filesystem, open a DB/network connection, or do other I/O — compile
   graphs/clients lazily (see `get_graph()` in `invoice_agent/graph.py`).
+- **Reading an env var before `load_dotenv()` has run.** (Phase 9B) A value
+  set only in `.env` (never exported into the real shell environment) is
+  invisible to `os.environ.get(...)` until something actually loads the
+  file — if the code that reads it runs first, it silently falls back to
+  whatever default it has, with no error. Bit us in `app/main.py`:
+  `create_app()` called `app.add_middleware(CORSMiddleware,
+  allow_origins=_cors_origins(), ...)` synchronously at app-construction
+  time, but `load_dotenv()` only ran later, inside the async `lifespan`
+  (which doesn't execute until the ASGI server actually starts serving) —
+  so `CORS_ALLOW_ORIGINS` set in `.env` had zero effect; only the hardcoded
+  default origins ever got through. Caught live while wiring up the Phase
+  9B frontend against a non-default dev port. Fixed by moving
+  `load_dotenv()` to the top of `create_app()`, before anything reads
+  `os.environ`. General shape: whenever a value from `.env` feeds a
+  synchronous construction step (middleware, a client built at import
+  time, a module-level constant), check `load_dotenv()` actually ran
+  *before* that step, not just "before the app serves traffic."
 - **Unbounded serial network fetch over an unfiltered result set.**
   Iterating every result of a broad search/list call and doing a heavy
   per-item network fetch just to filter client-side, instead of pushing the
