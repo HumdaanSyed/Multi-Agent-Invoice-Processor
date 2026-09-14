@@ -136,3 +136,13 @@ class ReadinessResponse(BaseModel):
 
     status: Literal["ok", "degraded"]
     checks: dict[str, ReadinessCheck]
+
+
+class ExportStatusResponse(BaseModel):
+    """GET /export/status (Phase 8.6) - row count and freshness of the
+    export ledger, for a persistent "N invoices exported, last written
+    at ..." UI element. `last_written_at` is None only for a ledger with
+    no rows yet."""
+
+    row_count: int
+    last_written_at: Optional[str] = None

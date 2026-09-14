@@ -12,6 +12,7 @@ call - those are two separate `graph.invoke()` calls tied together only by
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Annotated, Literal, Optional, TypedDict
@@ -30,8 +31,6 @@ from invoice_agent.extract import MODEL as EXTRACT_MODEL
 from invoice_agent.extract import extract_invoice, extract_invoice_streaming
 from invoice_agent.tracing import trace_callbacks, traced_generation
 from invoice_agent.validate import validate_invoice
-
-EXPORT_CSV_PATH = Path(__file__).resolve().parent.parent / "exports" / "invoices.csv"
 
 DocType = Literal["invoice", "receipt", "other"]
 
@@ -56,6 +55,8 @@ class GraphState(TypedDict):
     status: str
     messages: Annotated[list, add_messages]
 
+
+logger = logging.getLogger("invoice_agent.graph")
 
 ROUTER_MODEL = "claude-sonnet-5"
 ROUTER_MAX_TOKENS = 256
@@ -222,20 +223,44 @@ def human_review(state: GraphState, config: Optional[RunnableConfig] = None) -> 
 
 def output(state: GraphState, config: Optional[RunnableConfig] = None) -> dict:
     """Persist the invoice: upload the source PDF, upsert to Supabase (with
-    the resulting storage path), and append the CSV export."""
+    the resulting storage path), and append a row to the export ledger.
+
+    The ledger insert runs strictly *after* insert_invoice succeeds, never
+    before or in parallel (REVIEW.md: "ledger rows written without a
+    successful invoice write") - an invoice must never appear in the
+    ledger unless it was actually persisted. It's in its own try/except,
+    separate from upload_pdf/insert_invoice above: the ledger is an
+    audit trail, not the invoice's system of record, so a ledger-write
+    failure (a missing table, a transient Supabase error) is logged and
+    surfaced via SSE rather than failing a run whose invoice was already
+    durably saved.
+    """
     _publish(config, "stage", node="output", stage="saving")
     invoice = state["invoice"]
     pdf_storage_path = None
     try:
         pdf_storage_path = db.upload_pdf(state["file_path"])
         db.insert_invoice({**invoice, "pdf_storage_path": pdf_storage_path})
-        db.export_invoice_csv(invoice, EXPORT_CSV_PATH)
     except Exception as exc:
         raise RuntimeError(
             f"output failed persisting vendor={invoice.get('vendor_name')!r} "
             f"invoice_number={invoice.get('invoice_number')!r} "
             f"(pdf_storage_path={pdf_storage_path!r} - already uploaded if set): {exc}"
         ) from exc
+
+    try:
+        db.insert_export_row(_thread_id(config) or "", invoice)
+    except Exception:
+        logger.exception(
+            "output: invoice persisted but insert_export_row failed for "
+            "vendor=%r invoice_number=%r",
+            invoice.get("vendor_name"),
+            invoice.get("invoice_number"),
+        )
+        _publish(config, "ledger", status="failed")
+    else:
+        _publish(config, "ledger", status="written")
+
     return {"status": "completed"}
 
 

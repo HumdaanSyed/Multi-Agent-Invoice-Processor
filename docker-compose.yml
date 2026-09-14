@@ -8,7 +8,7 @@
 # runs it, rather than each service getting its own independent `build: .`
 # (which used to silently produce two separate ~945MB images).
 #
-# Named volumes, not bind mounts, for checkpoints/uploads/exports: the
+# Named volumes, not bind mounts, for checkpoints/uploads: the
 # runtime image runs as a non-root user (Dockerfile), and a bind mount
 # preserves the HOST directory's ownership inside the container - on a
 # native Linux Docker host that's a near-guaranteed "permission denied"
@@ -29,7 +29,6 @@ services:
     volumes:
       - checkpoint_data:/app/checkpoints
       - upload_data:/app/uploads
-      - export_data:/app/exports
     restart: unless-stopped
     # No explicit healthcheck: block - relies on the Dockerfile's own
     # HEALTHCHECK instruction, which frontend's depends_on below reads.
@@ -67,4 +66,3 @@ services:
 volumes:
   checkpoint_data:
   upload_data:
-  export_data:

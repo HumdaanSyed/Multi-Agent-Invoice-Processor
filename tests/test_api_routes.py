@@ -70,7 +70,7 @@ def _make_client(monkeypatch, *, invoice: dict = FLAWED_INVOICE) -> TestClient:
     monkeypatch.setattr(graph_module, "extractor", fake_extractor)
     monkeypatch.setattr(db, "upload_pdf", lambda path: "invoices/fakehash_x.pdf")
     monkeypatch.setattr(db, "insert_invoice", lambda inv: {**inv, "id": 1})
-    monkeypatch.setattr(db, "export_invoice_csv", lambda inv, path: None)
+    monkeypatch.setattr(db, "insert_export_row", lambda thread_id, inv: {**inv, "id": 1, "thread_id": thread_id})
     monkeypatch.setattr(db, "is_duplicate", lambda vendor, number: False)
 
     conn = sqlite3.connect(":memory:", check_same_thread=False)

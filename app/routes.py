@@ -14,6 +14,8 @@ reason not to stay on the event loop.
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import uuid
 
@@ -44,6 +46,7 @@ from app.errors import (
 )
 from app.health import check_readiness
 from app.models import (
+    ExportStatusResponse,
     HealthResponse,
     ReadinessResponse,
     ResumeRequest,
@@ -54,7 +57,7 @@ from app.models import (
 )
 from app.service import DerivedStatus, GraphService, derive_status
 from app.uploads import save_upload, sweep_old_uploads
-from invoice_agent import events
+from invoice_agent import db, events
 
 router = APIRouter()
 logger = logging.getLogger("app.routes")
@@ -365,6 +368,86 @@ def list_invoice_runs(request: Request, limit: int = Query(20, ge=1, le=100)) ->
     service = _service(request)
     rows = service.list_runs(limit=limit)
     return RunListResponse(runs=[RunSummary(**row) for row in rows])
+
+
+def _stream_csv_rows(rows, writer: "csv.DictWriter", buffer: io.StringIO, error_row: dict):
+    """Shared shape for streaming DictWriter rows as they're produced, with
+    a failure mid-iteration caught and reported in-band rather than left to
+    abort the response. Reuse this for the next Supabase-backed CSV export
+    instead of re-copying the try/except.
+
+    By the time any caller of this generator is pulling from it, the 200
+    status and `text/csv` headers are already committed (StreamingResponse
+    sends them before ever pulling the first chunk - same reasoning as
+    stream_invoice_run's `ChannelClosed` handling for the SSE side of this
+    problem, documented in REVIEW.md), so a mid-stream failure can only be
+    caught and reported in-band - it can never become a clean HTTP error.
+    `error_row` must already be shaped as a valid row for `writer` (every
+    fieldname present) - not a raw string - so it round-trips through
+    ordinary CSV readers as one extra, clearly-flagged row instead of a
+    "#"-prefixed comment line, which RFC 4180 has no concept of and which
+    pandas/csv.DictReader would otherwise silently misparse as a malformed
+    data row.
+    """
+    try:
+        for row in rows:
+            writer.writerow(row)
+            yield buffer.getvalue()
+            buffer.seek(0)
+            buffer.truncate(0)
+    except Exception:
+        logger.exception("CSV export failed partway through streaming")
+        writer.writerow(error_row)
+        yield buffer.getvalue()
+
+
+def _export_csv_chunks():
+    """Sync generator, streamed via StreamingResponse's automatic
+    threadpool wrapping (Starlette wraps any non-async-iterable content
+    with `iterate_in_threadpool`) - consistent with every other Supabase-
+    touching handler in this module being a plain sync `def`. Builds one
+    CSV line per DictWriter call via a reused StringIO buffer, so the
+    ledger is never held in memory as a single string (the 1GB-RAM
+    constraint this project targets) no matter how many rows it has -
+    `db.iter_export_rows()` itself pages through Supabase rather than
+    fetching everything in one call.
+    """
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=db.LEDGER_CSV_FIELDS)
+
+    writer.writeheader()
+    yield buffer.getvalue()
+    buffer.seek(0)
+    buffer.truncate(0)
+
+    def _ledger_csv_rows():
+        for ledger_row in db.iter_export_rows():
+            yield from db.export_ledger_row_to_csv_rows(ledger_row)
+
+    error_row = dict.fromkeys(db.LEDGER_CSV_FIELDS, "")
+    error_row[db.LEDGER_CSV_FIELDS[0]] = "ERROR: export truncated - see server logs"
+    yield from _stream_csv_rows(_ledger_csv_rows(), writer, buffer, error_row)
+
+
+@router.get("/export.csv")
+def download_export_csv() -> StreamingResponse:
+    """The full export ledger, ordered oldest-first, as a CSV download -
+    every successful invoice write ever persisted, including every
+    corrected re-run as its own row (the ledger is append-only, never
+    deduplicated - see REVIEW.md)."""
+    return StreamingResponse(
+        _export_csv_chunks(),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="invoices.csv"'},
+    )
+
+
+@router.get("/export/status", response_model=ExportStatusResponse)
+def export_status() -> ExportStatusResponse:
+    """Row count and freshness of the export ledger, for a persistent
+    "N invoices exported" UI element that doesn't need to download the
+    whole CSV just to show that."""
+    return ExportStatusResponse(**db.export_status())
 
 
 @router.get("/health", response_model=HealthResponse)

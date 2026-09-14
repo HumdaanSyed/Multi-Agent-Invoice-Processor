@@ -49,7 +49,6 @@ checkpoints/
 # Ingested / working data - runtime data, not build input
 attachments/
 uploads/
-exports/
 data/samples/
 data/inbox/
 
