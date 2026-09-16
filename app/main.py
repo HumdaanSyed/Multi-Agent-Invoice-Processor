@@ -35,6 +35,30 @@ def _cors_origins() -> list[str]:
     raw = os.environ.get("CORS_ALLOW_ORIGINS") or DEFAULT_CORS_ORIGINS
     return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
+
+class _EnvAwareCORSMiddleware(CORSMiddleware):
+    """CORSMiddleware, but re-reads CORS_ALLOW_ORIGINS from the environment
+    on every request instead of baking a list in at construction time.
+
+    `app = create_app()` runs at module scope (uvicorn's ASGI-app-discovery
+    convention - see this module's docstring), which is import time, not
+    serve time. `load_dotenv()` must stay confined to the lifespan (it only
+    runs once the ASGI server actually starts serving) so importing this
+    module stays side-effect-free, per this module's own docstring and
+    invoice_agent/graph.py's get_graph() convention - but that means a
+    static `allow_origins=_cors_origins()` passed to the base class's
+    `__init__` would only ever see the hardcoded default, never a value set
+    only in .env, since .env hasn't been loaded yet at that point. Checking
+    the environment fresh on every request instead means it's always
+    correct by the time any real request arrives, without either module
+    import doing file I/O.
+    """
+
+    def is_allowed_origin(self, origin: str) -> bool:
+        if self.allow_origin_regex is not None and self.allow_origin_regex.fullmatch(origin):
+            return True
+        return origin in _cors_origins()
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CHECKPOINT_DB_PATH = REPO_ROOT / "checkpoints" / "graph.sqlite"
 DEFAULT_UPLOAD_DIR = REPO_ROOT / "uploads"
@@ -71,30 +95,21 @@ def create_app(*, checkpointer: Optional[BaseCheckpointSaver] = None, load_env: 
     app/service.py's `GraphService` docstring for why: two SqliteSaver
     instances over two connections have two different internal locks).
 
-    `load_env`: whether this function calls `load_dotenv()` before building
-    the app. False for tests - `TestClient(app)` runs the lifespan as a
-    context manager, and this repo's `.env` holds real credentials; a test
-    that doesn't need them must not pull them into `os.environ`.
+    `load_env`: whether the lifespan calls `load_dotenv()`. False for tests
+    - `TestClient(app)` runs the lifespan as a context manager, and this
+    repo's `.env` holds real credentials; a test that doesn't need them must
+    not pull them into `os.environ`.
     """
-    if load_env:
-        # Must happen here, before _cors_origins() is read below - not
-        # inside the lifespan, which only runs once the ASGI server starts
-        # serving. app.add_middleware(CORSMiddleware, ...) reads
-        # os.environ at import/construction time (this function's own
-        # call), so a CORS_ALLOW_ORIGINS set only in .env (never exported
-        # into the real shell environment) was silently ignored - the
-        # process's own os.environ.get() saw nothing until load_dotenv()
-        # ran, which was already too late to affect the CORS middleware
-        # built moments earlier.
-        from dotenv import load_dotenv
-
-        load_dotenv()
-
     owns_connection = checkpointer is None
     state: dict = {}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        if load_env:
+            from dotenv import load_dotenv
+
+            load_dotenv()
+
         # Bind the loop this lifespan is itself running on, so
         # invoice_agent/events.py's publish() (called from graph nodes on
         # a worker thread - see app/service.py's module docstring) can
@@ -139,9 +154,12 @@ def create_app(*, checkpointer: Optional[BaseCheckpointSaver] = None, load_env: 
     # Not allow_origins=["*"]: an explicit list is the reviewable choice,
     # and the SSE stream endpoint benefits the same as any other route -
     # CORSMiddleware wraps a StreamingResponse with no special handling.
+    # _EnvAwareCORSMiddleware (not a static allow_origins=_cors_origins()
+    # list) because this call happens at import time, before load_env's
+    # load_dotenv() (deferred into the lifespan above, on purpose) has run.
     app.add_middleware(
-        CORSMiddleware,
-        allow_origins=_cors_origins(),
+        _EnvAwareCORSMiddleware,
+        allow_origins=(),
         allow_credentials=False,
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],

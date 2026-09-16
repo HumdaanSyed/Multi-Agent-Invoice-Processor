@@ -18,6 +18,12 @@ export function UploadZone() {
   const [error, setError] = useState<string | null>(null);
 
   async function handleFile(file: File) {
+    // Guards every entry point at once (click, drag-drop, Enter/Space on
+    // the focused dropzone, and the hidden input's onChange) - pointer-
+    // events-none below only blocks the mouse, not the keyboard or a
+    // programmatic re-trigger, so this is the one place that actually
+    // prevents a second reserveRun() firing while the first is in flight.
+    if (isSubmitting) return;
     if (!isPdf(file)) {
       setError(`"${file.name}" isn't a PDF. Verity only reads PDF invoices.`);
       return;

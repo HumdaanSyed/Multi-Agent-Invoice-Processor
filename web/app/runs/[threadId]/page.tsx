@@ -8,6 +8,18 @@ import { ValidationPanel } from "@/components/validation-panel";
 import { useRun } from "@/hooks/use-run";
 import { getRunFile } from "@/lib/run-file-cache";
 
+/**
+ * A backend flag is a raw check-detail string (invoice_agent/validate.py),
+ * e.g. "Possible duplicate: vendor='Acme Corp' number='INV-1'" - not
+ * written for an end user. Full plain-language rewriting of these is
+ * Phase 9C's job (docs/FRONTEND_PLAN.md), but stripping the Python-repr
+ * quoting (`='...'`) is a safe, self-contained improvement to make now
+ * rather than shipping that punctuation to a viewer in the meantime.
+ */
+function humanizeFlag(flag: string): string {
+  return flag.replace(/=['"]([^'"]*)['"]/g, ": $1");
+}
+
 export default function RunPage({ params }: PageProps<"/runs/[threadId]">) {
   const { threadId } = use(params);
   const file = getRunFile(threadId);
@@ -53,7 +65,7 @@ export default function RunPage({ params }: PageProps<"/runs/[threadId]">) {
           <p className="font-medium text-flag">Needs review</p>
           <ul className="mt-2 list-disc pl-5 text-sm text-text">
             {(run?.flags ?? []).map((flag) => (
-              <li key={flag}>{flag}</li>
+              <li key={flag}>{humanizeFlag(flag)}</li>
             ))}
           </ul>
           {/* Editable fields + the resume action arrive in Phase 9C
