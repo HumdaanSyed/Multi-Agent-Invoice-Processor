@@ -77,6 +77,39 @@ instance of any of these as high-confidence, not merely plausible:
 - **Import-time side effects.** Module import must not touch the
   filesystem, open a DB/network connection, or do other I/O — compile
   graphs/clients lazily (see `get_graph()` in `invoice_agent/graph.py`).
+- **Reading an env var before `load_dotenv()` has run — and the fix must
+  not itself become an import-time side effect.** (Phase 9B) A value set
+  only in `.env` (never exported into the real shell environment) is
+  invisible to `os.environ.get(...)` until something actually loads the
+  file. Bit us twice in `app/main.py`, in opposite directions:
+  1. `app.add_middleware(CORSMiddleware, allow_origins=_cors_origins(), ...)`
+     ran synchronously at `create_app()`-construction time, but
+     `load_dotenv()` only ran later, inside the async `lifespan` (which
+     doesn't execute until the ASGI server actually starts serving) - so
+     `CORS_ALLOW_ORIGINS` set in `.env` had zero effect, only the
+     hardcoded default origins ever got through.
+  2. The first fix moved `load_dotenv()` to the top of `create_app()` -
+     which broke a *different* rule ("Import-time side effects," above):
+     `app = create_app()` runs at module scope (uvicorn's ASGI-app-
+     discovery convention), so a bare `import app.main` now loaded real
+     secrets into `os.environ` as a side effect of import - verified live
+     (`import app.main` then reading `os.environ["GMAIL_APP_PASSWORD"]`
+     printed the real value), and it defeated `tests/test_api_routes.py`'s
+     `create_app(load_env=False)` opt-out, since the module-level `app =
+     create_app()` line runs regardless of which symbol a caller imports.
+
+  The actual fix keeps `load_dotenv()` confined to the lifespan (no import
+  side effect) and instead makes CORS re-read `os.environ` on every
+  request instead of baking a value in at construction time -
+  `_EnvAwareCORSMiddleware` overrides `is_allowed_origin()` to call
+  `_cors_origins()` fresh each time, so it's always correct by the time
+  any real request arrives, without either module import or app
+  construction doing file I/O. General shape: a value from `.env` needed
+  at synchronous construction time (middleware, a client built at import
+  time, a module-level constant) can't be fixed by just moving
+  `load_dotenv()` earlier - that trades one bug for the other. Make the
+  *consumer* re-check the environment lazily instead of trying to load
+  `.env` any earlier than the lifespan already does.
 - **Unbounded serial network fetch over an unfiltered result set.**
   Iterating every result of a broad search/list call and doing a heavy
   per-item network fetch just to filter client-side, instead of pushing the
