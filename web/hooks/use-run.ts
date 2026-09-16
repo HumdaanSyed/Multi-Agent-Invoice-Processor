@@ -1,17 +1,20 @@
 "use client";
 
-import { useEffect, useReducer, useRef } from "react";
-import { ApiError, createRun, getRun, subscribeToRun } from "@/lib/api";
+import { useCallback, useEffect, useReducer, useRef } from "react";
+import { ApiError, createRun, getRun, resumeRun, subscribeToRun } from "@/lib/api";
 import { claimRunFile, getRunFile } from "@/lib/run-file-cache";
-import type { CheckEvent, Invoice, RunEvent, RunResponse } from "@/lib/types";
+import type { CheckEvent, Invoice, InvoiceCorrections, RunEvent, RunResponse } from "@/lib/types";
 
-/** SSE event types that mean "this particular stream connection is over" -
- * the server has already closed its end (docs/api.md: run_end and done
- * close the connection and, for run_end, the channel too; interrupted
- * closes only the connection, deliberately, so a resume has somewhere new
- * to open one). Closing our side too stops EventSource's built-in
- * auto-reconnect from firing a pointless reconnect against an already-
- * finished or already-closed channel. */
+/** SSE event types after which the *server* ends this connection on its
+ * own (docs/api.md: run_end and done close the connection and, for
+ * run_end, the channel too; interrupted closes only the connection,
+ * deliberately, so a resume has somewhere new to open one) - but only once
+ * the event is the *current* one, per invoice_agent/events.py's
+ * `is_current` bookkeeping, which never reaches the client over the wire.
+ * Never used to proactively close the client's own connection inline (see
+ * onTransportError below for why) - only consulted reactively there, to
+ * tell an expected server-initiated close apart from a real dropped
+ * connection. */
 const STREAM_END_EVENTS = new Set<RunEvent["type"]>(["run_end", "done", "interrupted", "error"]);
 
 const POLL_INTERVAL_MS = 2500;
@@ -25,6 +28,7 @@ interface State {
   revealedChecks: CheckEvent[];
   settlingChecks: boolean;
   ledgerStatus: "unknown" | "written" | "failed";
+  resuming: boolean;
   error: string | null;
 }
 
@@ -37,6 +41,7 @@ type Action =
   | { type: "checks_settled" }
   | { type: "ledger"; status: "written" | "failed" }
   | { type: "run"; run: RunResponse }
+  | { type: "resuming"; value: boolean }
   | { type: "error"; message: string };
 
 const initialState: State = {
@@ -47,6 +52,7 @@ const initialState: State = {
   revealedChecks: [],
   settlingChecks: false,
   ledgerStatus: "unknown",
+  resuming: false,
   error: null,
 };
 
@@ -74,6 +80,8 @@ function reducer(state: State, action: Action): State {
       return { ...state, ledgerStatus: action.status };
     case "run":
       return { ...state, run: action.run, error: null };
+    case "resuming":
+      return { ...state, resuming: action.value };
     case "error":
       return { ...state, error: action.message };
     default:
@@ -107,10 +115,17 @@ function isTerminal(status: RunResponse["status"] | undefined): boolean {
  * a correct final state even though createRun()'s own promise may never
  * resolve (docs/api.md: "a timed-out client loses nothing but the response
  * body" - the run keeps going server-side).
+ *
+ * Also returns resume(corrections): submits a correction to the resume
+ * endpoint. "interrupted" already closed the previous SSE connection
+ * (docs/api.md - deliberately, so a resume has somewhere new to open one),
+ * so this opens a fresh one first, same reserve-before-upload ordering as
+ * the initial run, so the re-validation's own events aren't missed.
  */
 export function useRun(threadId: string) {
   const [state, dispatch] = useReducer(reducer, initialState);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const resumeRef = useRef<((corrections: InvoiceCorrections) => Promise<void>) | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -147,6 +162,11 @@ export function useRun(threadId: string) {
         }
       }, POLL_INTERVAL_MS);
     };
+
+    // Tracks the most recently processed event's type, purely so
+    // onTransportError (below) can tell an expected server-initiated close
+    // apart from a genuine dropped connection - see its own comment.
+    let lastEventType: RunEvent["type"] | null = null;
 
     // Client-side stagger for revealing check results (~200ms apart, per
     // docs/FRONTEND_PLAN.md - validation itself runs in milliseconds
@@ -202,21 +222,58 @@ export function useRun(threadId: string) {
         default:
           break;
       }
-      if (STREAM_END_EVENTS.has(event.type)) {
-        closeStream?.();
-      }
+      lastEventType = event.type;
     };
 
     const onTransportError = () => {
-      // EventSource's own error - a dropped connection, not one of the
-      // backend's documented terminal event types. Stop relying on it and
-      // fall back to polling for the authoritative final state.
+      // A run interrupted and later resumed republishes a fresh
+      // validation_start/checks/interrupted-or-run_end into the SAME
+      // channel history (invoice_agent/events.py) - a *new* connection
+      // (opened after a resume, or under React Strict Mode's double-mount)
+      // replays that *entire* accumulated history from the start, so an
+      // earlier "interrupted" can sit mid-replay with more, newer events
+      // still to come after it. The server itself only closes the
+      // connection once it reaches the truly *current* terminal event
+      // (events.py's is_current bookkeeping) - it deliberately does NOT
+      // close right after a stale one, specifically so a client reading
+      // the whole stream reaches the real current state. So this code
+      // must never proactively close on seeing interrupted/run_end/done/
+      // error inline (that raced ahead of the server and truncated the
+      // replay before the current state ever arrived - the exact bug that
+      // shipped here initially). Instead: EventSource's onerror always
+      // fires when the server ends the connection, terminal-event or not,
+      // so check what the *last* event we actually saw was. If it was one
+      // of STREAM_END_EVENTS, the server closed this on purpose right
+      // after delivering the real current state - our own state is
+      // already correct, nothing to recover. Otherwise this is a genuine
+      // dropped connection mid-stream, and only then does the polling
+      // fallback belong.
+      const wasExpectedClose = lastEventType !== null && STREAM_END_EVENTS.has(lastEventType);
       closeStream?.();
-      startPolling();
+      if (!wasExpectedClose) {
+        startPolling();
+      }
     };
 
     const openStream = () => {
+      // Reset so a stale lastEventType from a just-closed connection can't
+      // be mistaken for this fresh one's outcome if it fails immediately.
+      lastEventType = null;
       closeStream = subscribeToRun(threadId, onEvent, onTransportError);
+    };
+
+    resumeRef.current = async (corrections: InvoiceCorrections) => {
+      dispatch({ type: "resuming", value: true });
+      stopPolling();
+      openStream();
+      try {
+        const run = await resumeRun(threadId, corrections);
+        dispatch({ type: "run", run });
+      } catch (err) {
+        dispatch({ type: "error", message: err instanceof ApiError ? err.message : "Resume failed." });
+      } finally {
+        dispatch({ type: "resuming", value: false });
+      }
     };
 
     const file = claimRunFile(threadId);
@@ -257,11 +314,16 @@ export function useRun(threadId: string) {
 
     return () => {
       cancelled = true;
+      resumeRef.current = null;
       if (revealTimer !== null) clearTimeout(revealTimer);
       closeStream?.();
       stopPolling();
     };
   }, [threadId]);
+
+  const resume = useCallback((corrections: InvoiceCorrections) => {
+    return resumeRef.current?.(corrections) ?? Promise.resolve();
+  }, []);
 
   return {
     run: state.run,
@@ -271,6 +333,8 @@ export function useRun(threadId: string) {
     checks: state.revealedChecks,
     checksSettling: state.settlingChecks,
     ledgerStatus: state.ledgerStatus,
+    resuming: state.resuming,
+    resume,
     error: state.error,
   };
 }

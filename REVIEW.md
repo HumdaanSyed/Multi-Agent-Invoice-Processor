@@ -455,6 +455,38 @@ instance of any of these as high-confidence, not merely plausible:
   differ per event type), so check any *new* streaming/`StreamingResponse`
   endpoint for this rather than assuming it's covered.
 
+- **A client that closes an SSE connection on the first terminal-*shaped*
+  event it sees, when the server's replayed history can contain more than
+  one.** (Phase 9C) `invoice_agent/events.py`'s channel history is
+  cumulative across a run's *entire* lifetime, not reset per connection -
+  after N resumes, a fresh subscriber's replay contains N validation
+  cycles' worth of events, each ending in its own `interrupted` (or
+  `run_end`). The backend already computes which one is genuinely current
+  (`subscribe()`'s `is_current`, true only for the last backlog item and
+  everything live after it) and only closes the connection once it reaches
+  that one - deliberately not on an earlier, stale `interrupted` - but
+  `is_current` is server-side bookkeeping only, never sent over the wire.
+  `web/hooks/use-run.ts` originally closed its own `EventSource` inline on
+  *any* `interrupted`/`run_end`/`done`/`error` event, racing ahead of the
+  server and truncating the replay before the real current state ever
+  arrived - caught live testing Phase 9C's resume flow: a corrected
+  invoice's re-validation showed a stale, half-updated mix of the old and
+  new check results, and the browser's network tab showed a reconnect
+  storm (20+ rapid `/stream` requests) as the client kept closing on each
+  stale historical terminal event, triggering `onerror`, which (wrongly
+  reading the close as unexpected) fell back to polling. Fixed by never
+  closing inline on an event's *type* - EventSource's `onerror` already
+  fires reliably whenever the server ends the connection, terminal event
+  or not, so the fix tracks the *last event actually seen* and only
+  decides at that point whether the close was expected (last event was
+  terminal - state is already correct, don't reconnect or poll) or a real
+  drop (fall back to polling). General shape: if a server computes "is
+  this the current one" from something a client can't see directly (here,
+  position in a replay stream), the client can't replicate that decision
+  proactively per-event - it has to observe the same signal the server
+  used to decide when *it* was done (here: the connection actually
+  closing) rather than guessing from event type alone.
+
 ## Known intentional patterns — do not re-flag
 
 - The `invoice_exports` Postgres table (Phase 8.6, replacing the earlier

@@ -3,30 +3,29 @@
 import { use } from "react";
 import { ExtractionPanel } from "@/components/extraction-panel";
 import { PdfPreview } from "@/components/pdf-preview";
+import { ReviewForm } from "@/components/review-form";
 import { StageIndicator } from "@/components/stage-indicator";
 import { ValidationPanel } from "@/components/validation-panel";
 import { useRun } from "@/hooks/use-run";
 import { getRunFile } from "@/lib/run-file-cache";
 
-/**
- * A backend flag is a raw check-detail string (invoice_agent/validate.py),
- * e.g. "Possible duplicate: vendor='Acme Corp' number='INV-1'" - not
- * written for an end user. Full plain-language rewriting of these is
- * Phase 9C's job (docs/FRONTEND_PLAN.md), but stripping the Python-repr
- * quoting (`='...'`) is a safe, self-contained improvement to make now
- * rather than shipping that punctuation to a viewer in the meantime.
- */
-function humanizeFlag(flag: string): string {
-  return flag.replace(/=['"]([^'"]*)['"]/g, ": $1");
-}
-
 export default function RunPage({ params }: PageProps<"/runs/[threadId]">) {
   const { threadId } = use(params);
   const file = getRunFile(threadId);
-  const { run, stage, fields, receivedFields, checks, checksSettling, ledgerStatus, error } = useRun(threadId);
+  const { run, stage, fields, receivedFields, checks, checksSettling, ledgerStatus, resuming, resume, error } =
+    useRun(threadId);
 
   const status = run?.status;
-  const showLiveView = status !== "skipped" && status !== "failed";
+  // The review form takes over, exclusively, only once needs_review has
+  // fully settled (the initial staggered reveal is done) and no resume is
+  // in flight. Everything else - including a resume, which re-enters
+  // validation and re-runs the exact same reveal (docs/FRONTEND_PLAN.md's
+  // Phase 9C instruction 6) - shows the live extraction/validation grid,
+  // matching how needs_review's own initial reveal already worked in
+  // Phase 9B before this form existed.
+  const showReviewForm = status === "needs_review" && !checksSettling && !resuming;
+  const showLiveView = status !== "skipped" && status !== "failed" && !showReviewForm;
+  const failedChecks = checks.filter((check) => !check.skipped && !check.passed);
 
   return (
     <div className="flex flex-col gap-6">
@@ -60,19 +59,10 @@ export default function RunPage({ params }: PageProps<"/runs/[threadId]">) {
         </div>
       )}
 
-      {status === "needs_review" && !checksSettling && (
-        <div className="rounded-lg border border-flag/30 bg-surface p-6">
-          <p className="font-medium text-flag">Needs review</p>
-          <ul className="mt-2 list-disc pl-5 text-sm text-text">
-            {(run?.flags ?? []).map((flag) => (
-              <li key={flag}>{humanizeFlag(flag)}</li>
-            ))}
-          </ul>
-          {/* Editable fields + the resume action arrive in Phase 9C
-              (docs/FRONTEND_PLAN.md) - this is read-only for now. */}
-          <p className="mt-3 text-sm text-text-muted">
-            Correcting and resubmitting flagged fields isn&apos;t built yet.
-          </p>
+      {showReviewForm && run?.invoice && (
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <PdfPreview file={file} />
+          <ReviewForm invoice={run.invoice} failedChecks={failedChecks} onSubmit={resume} submitting={resuming} />
         </div>
       )}
 
