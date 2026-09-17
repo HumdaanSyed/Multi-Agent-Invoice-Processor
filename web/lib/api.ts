@@ -112,8 +112,13 @@ export function exportCsvUrl(): string {
   return `${API_BASE_URL}/export.csv`;
 }
 
-export function streamUrl(threadId: string): string {
-  return `${API_BASE_URL}/invoices/${encodeURIComponent(threadId)}/stream`;
+/** `afterEventId`, when given, skips replaying history up through that id -
+ * see subscribeToRun's own docs for why this has to be a query param
+ * rather than the Last-Event-ID header a native EventSource reconnect
+ * would send. */
+export function streamUrl(threadId: string, afterEventId?: string): string {
+  const base = `${API_BASE_URL}/invoices/${encodeURIComponent(threadId)}/stream`;
+  return afterEventId ? `${base}?last_event_id=${encodeURIComponent(afterEventId)}` : base;
 }
 
 const RUN_EVENT_TYPES: RunEventType[] = [
@@ -141,16 +146,29 @@ const RUN_EVENT_TYPES: RunEventType[] = [
  * per known event name (docs/api.md's event table) and re-shapes each into
  * a plain RunEvent object rather than making callers deal with MessageEvent
  * and JSON.parse themselves.
+ *
+ * `afterEventId`, when given, is passed to streamUrl() so the server skips
+ * replaying history the caller already has (see events.py's history
+ * replay - unbounded within a run's lifetime, growing with every resume).
+ * `onEventId`, when given, is called with every message's own id (the SSE
+ * `id:` field, exposed by the browser as `MessageEvent.lastEventId`) so a
+ * caller that reconnects later (e.g. after a resume) can pass the latest
+ * one back in as `afterEventId`.
  */
 export function subscribeToRun(
   threadId: string,
   onEvent: (event: RunEvent) => void,
   onError?: (event: Event) => void,
+  afterEventId?: string,
+  onEventId?: (id: string) => void,
 ): () => void {
-  const source = new EventSource(streamUrl(threadId));
+  const source = new EventSource(streamUrl(threadId, afterEventId));
 
   for (const type of RUN_EVENT_TYPES) {
     source.addEventListener(type, (message: MessageEvent<string>) => {
+      if (message.lastEventId) {
+        onEventId?.(message.lastEventId);
+      }
       try {
         const payload = JSON.parse(message.data) as Record<string, unknown>;
         onEvent({ type, ...payload } as RunEvent);

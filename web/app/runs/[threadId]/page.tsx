@@ -3,36 +3,46 @@
 import { use } from "react";
 import { ExtractionPanel } from "@/components/extraction-panel";
 import { PdfPreview } from "@/components/pdf-preview";
+import { ReviewForm } from "@/components/review-form";
 import { StageIndicator } from "@/components/stage-indicator";
 import { ValidationPanel } from "@/components/validation-panel";
 import { useRun } from "@/hooks/use-run";
 import { getRunFile } from "@/lib/run-file-cache";
 
-/**
- * A backend flag is a raw check-detail string (invoice_agent/validate.py),
- * e.g. "Possible duplicate: vendor='Acme Corp' number='INV-1'" - not
- * written for an end user. Full plain-language rewriting of these is
- * Phase 9C's job (docs/FRONTEND_PLAN.md), but stripping the Python-repr
- * quoting (`='...'`) is a safe, self-contained improvement to make now
- * rather than shipping that punctuation to a viewer in the meantime.
- */
-function humanizeFlag(flag: string): string {
-  return flag.replace(/=['"]([^'"]*)['"]/g, ": $1");
-}
-
 export default function RunPage({ params }: PageProps<"/runs/[threadId]">) {
   const { threadId } = use(params);
   const file = getRunFile(threadId);
-  const { run, stage, fields, receivedFields, checks, checksSettling, ledgerStatus, error } = useRun(threadId);
+  const { run, stage, fields, receivedFields, checks, checksSettling, ledgerStatus, resuming, resume, error } =
+    useRun(threadId);
 
   const status = run?.status;
-  const showLiveView = status !== "skipped" && status !== "failed";
+  // Deliberately NOT gated on `!resuming`: a resume attempt that never
+  // actually re-validates (the corrected invoice fails Pydantic validation
+  // server-side before the graph even runs, so no SSE events ever arrive)
+  // must not unmount ReviewForm - checksSettling only flips true once a
+  // real validation_start/check stream starts, so staying mounted through
+  // a failed, event-less resume keeps the user's typed corrections instead
+  // of remounting a fresh form from the still-uncorrected invoice. A
+  // resume that DOES reach the graph republishes validation_start, which
+  // flips checksSettling true and swaps to the live grid below (re-running
+  // the exact same reveal - docs/FRONTEND_PLAN.md's Phase 9C instruction
+  // 6) - once it settles again, a genuinely new ReviewForm mounts from the
+  // freshly re-validated invoice, which is what should happen then.
+  const showReviewForm = status === "needs_review" && !checksSettling;
+  const showLiveView = status !== "skipped" && status !== "failed" && !showReviewForm;
+  const failedChecks = checks.filter((check) => !check.skipped && !check.passed);
 
   return (
     <div className="flex flex-col gap-6">
       <StageIndicator stage={stage} />
 
-      {error && <p className="text-sm text-error">{error}</p>}
+      {/* Framed as "your changes weren't saved" rather than a bare error
+          dump - the message itself can still be a raw backend validation
+          string (e.g. a Pydantic error) until that's addressed server-side,
+          but ReviewForm now stays mounted through this (see showReviewForm
+          above), so the corrections that triggered it aren't lost either
+          way. */}
+      {error && <p className="text-sm text-error">Couldn&apos;t save your changes: {error}</p>}
 
       {status === "skipped" && (
         <div className="rounded-lg border border-border bg-surface p-6">
@@ -60,19 +70,10 @@ export default function RunPage({ params }: PageProps<"/runs/[threadId]">) {
         </div>
       )}
 
-      {status === "needs_review" && !checksSettling && (
-        <div className="rounded-lg border border-flag/30 bg-surface p-6">
-          <p className="font-medium text-flag">Needs review</p>
-          <ul className="mt-2 list-disc pl-5 text-sm text-text">
-            {(run?.flags ?? []).map((flag) => (
-              <li key={flag}>{humanizeFlag(flag)}</li>
-            ))}
-          </ul>
-          {/* Editable fields + the resume action arrive in Phase 9C
-              (docs/FRONTEND_PLAN.md) - this is read-only for now. */}
-          <p className="mt-3 text-sm text-text-muted">
-            Correcting and resubmitting flagged fields isn&apos;t built yet.
-          </p>
+      {showReviewForm && run?.invoice && (
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <PdfPreview file={file} />
+          <ReviewForm invoice={run.invoice} failedChecks={failedChecks} onSubmit={resume} submitting={resuming} />
         </div>
       )}
 

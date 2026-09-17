@@ -1,19 +1,33 @@
 import { Skeleton } from "@/components/ui/skeleton";
 import type { Invoice, LineItem } from "@/lib/types";
 
-const FIELD_ROWS: { key: keyof Invoice; label: string; mono?: boolean }[] = [
-  { key: "vendor_name", label: "Vendor" },
-  { key: "bill_to", label: "Bill to" },
-  { key: "invoice_number", label: "Invoice #", mono: true },
-  { key: "invoice_date", label: "Invoice date", mono: true },
-  { key: "due_date", label: "Due date", mono: true },
-  { key: "subtotal", label: "Subtotal", mono: true },
-  { key: "tax", label: "Tax", mono: true },
-  { key: "total", label: "Total", mono: true },
-  { key: "currency", label: "Currency", mono: true },
+/**
+ * The 9 header-field rows every invoice display renders, in one place so
+ * this panel and web/components/review-form.tsx's editable form can't
+ * drift apart (a past review found them maintained as two separately
+ * hand-typed lists with matching labels). `mono` is this panel's own
+ * concern (numbers/dates/identifiers get the mono font); `type` is
+ * review-form's (which native `<input>` type to render) - each file uses
+ * only the property it needs.
+ */
+export const INVOICE_FIELD_ROWS: {
+  key: keyof Invoice;
+  label: string;
+  mono?: boolean;
+  type: "text" | "date" | "number";
+}[] = [
+  { key: "vendor_name", label: "Vendor", type: "text" },
+  { key: "bill_to", label: "Bill to", type: "text" },
+  { key: "invoice_number", label: "Invoice #", mono: true, type: "text" },
+  { key: "invoice_date", label: "Invoice date", mono: true, type: "date" },
+  { key: "due_date", label: "Due date", mono: true, type: "date" },
+  { key: "subtotal", label: "Subtotal", mono: true, type: "number" },
+  { key: "tax", label: "Tax", mono: true, type: "number" },
+  { key: "total", label: "Total", mono: true, type: "number" },
+  { key: "currency", label: "Currency", mono: true, type: "text" },
 ];
 
-function formatValue(key: keyof Invoice, value: unknown): string {
+export function formatValue(key: keyof Invoice, value: unknown): string {
   if (value === null || value === undefined || value === "") return "—";
   if (typeof value === "number" && (key === "subtotal" || key === "tax" || key === "total")) {
     return value.toFixed(2);
@@ -49,7 +63,7 @@ function FieldRow({
   );
 }
 
-function LineItemsTable({ items, provisional }: { items: LineItem[]; provisional?: boolean }) {
+export function LineItemsTable({ items, provisional }: { items: LineItem[]; provisional?: boolean }) {
   if (items.length === 0) {
     return <p className="py-2 text-sm text-text-muted">No line items.</p>;
   }
@@ -103,7 +117,7 @@ export function ExtractionPanel({
   return (
     <div className="rounded-lg border border-border bg-surface p-6">
       <div className="divide-y divide-border">
-        {FIELD_ROWS.map(({ key, label, mono }) => (
+        {INVOICE_FIELD_ROWS.map(({ key, label, mono }) => (
           <FieldRow
             key={key}
             label={label}
