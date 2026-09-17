@@ -54,6 +54,7 @@ class GraphState(TypedDict):
     validation: Optional[dict]
     status: str
     messages: Annotated[list, add_messages]
+    pdf_storage_path: Optional[str]
 
 
 logger = logging.getLogger("invoice_agent.graph")
@@ -261,7 +262,7 @@ def output(state: GraphState, config: Optional[RunnableConfig] = None) -> dict:
     else:
         _publish(config, "ledger", status="written")
 
-    return {"status": "completed"}
+    return {"status": "completed", "pdf_storage_path": pdf_storage_path}
 
 
 def route_after_classification(state: GraphState) -> str:

@@ -52,6 +52,7 @@ class DerivedStatus:
     flags: Optional[list[str]] = None
     current_node: Optional[str] = None
     failed_at_node: Optional[str] = None
+    pdf_storage_path: Optional[str] = None
 
 
 def derive_status(snapshot: StateSnapshot) -> Optional[DerivedStatus]:
@@ -108,6 +109,7 @@ def derive_status(snapshot: StateSnapshot) -> Optional[DerivedStatus]:
             status="completed",
             invoice=values.get("invoice"),
             validation=values.get("validation"),
+            pdf_storage_path=values.get("pdf_storage_path"),
         )
     if status == "skipped":
         # Router sent a receipt/other document straight to END - a

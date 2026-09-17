@@ -37,6 +37,13 @@ export interface RunResponse {
   flags?: string[] | null;
   current_node?: string | null;
   failed_at_node?: string | null;
+  /** Only ever set by GET /invoices/{thread_id} for a completed run - see
+   * app/models.py's RunResponse docstring. Never present on POST/resume's
+   * response, even for the same completed run. */
+  pdf_url?: string | null;
+  /** Same as pdf_url: completed-detail-fetch only, and only set at all if
+   * the backend has LANGFUSE_PROJECT_ID configured (docs/observability.md). */
+  trace_url?: string | null;
 }
 
 export interface RunSummary {

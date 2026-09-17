@@ -57,7 +57,7 @@ from app.models import (
 )
 from app.service import DerivedStatus, GraphService, derive_status
 from app.uploads import save_upload, sweep_old_uploads
-from invoice_agent import db, events
+from invoice_agent import db, events, tracing
 
 router = APIRouter()
 logger = logging.getLogger("app.routes")
@@ -350,12 +350,23 @@ def _get_derived_or_none(service: GraphService, thread_id: str) -> DerivedStatus
 
 @router.get("/invoices/{thread_id}", response_model=RunResponse)
 def get_invoice_run(thread_id: str, request: Request) -> RunResponse:
+    """The one place `pdf_url`/`trace_url` get populated (see RunResponse's
+    docstring) - both are best-effort convenience links for the frontend's
+    read-only detail view (docs/FRONTEND_PLAN.md's Phase 9D), generated
+    fresh on every request rather than cached, so a request for a run that
+    hasn't reached `completed` yet (or has no `pdf_storage_path` for some
+    other reason) simply gets neither, with no extra I/O attempted."""
     service = _service(request)
     snapshot = service.get_snapshot(thread_id)
     derived = derive_status(snapshot)
     if derived is None:
         raise ThreadNotFound(f"No run found for thread_id={thread_id!r}.", thread_id=thread_id)
-    return _to_run_response(thread_id, derived)
+    response = _to_run_response(thread_id, derived)
+    if derived.status == "completed":
+        if derived.pdf_storage_path:
+            response.pdf_url = db.get_pdf_signed_url(derived.pdf_storage_path)
+        response.trace_url = tracing.trace_url(thread_id)
+    return response
 
 
 @router.post("/invoices/{thread_id}/resume", response_model=RunResponse)

@@ -9,11 +9,14 @@ assumes exist.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
 from supabase import Client, create_client
+
+logger = logging.getLogger("invoice_agent.db")
 
 PDF_BUCKET = "invoice-pdfs"
 
@@ -125,6 +128,26 @@ def upload_pdf(path: str | Path) -> str:
         {"content-type": "application/pdf", "upsert": "true"},
     )
     return storage_path
+
+
+def get_pdf_signed_url(storage_path: str, expires_in: int = 3600) -> Optional[str]:
+    """A time-limited URL into the private `invoice-pdfs` bucket, for the
+    detail view's "source PDF" link (docs/FRONTEND_PLAN.md's Phase 9D).
+
+    Best-effort: unlike `upload_pdf`/`insert_invoice` (which must raise so a
+    real persistence failure is never silently swallowed - see
+    `invoice_agent/graph.py`'s `output()`), this is called after the invoice
+    is already durably saved, purely to render a convenience link. A
+    transient Supabase Storage error here must not take down the whole
+    detail view for an invoice that otherwise persisted fine, so any
+    failure degrades to None rather than raising.
+    """
+    try:
+        response = get_client().storage.from_(PDF_BUCKET).create_signed_url(storage_path, expires_in)
+        return response.get("signedUrl")
+    except Exception:
+        logger.exception("get_pdf_signed_url failed for storage_path=%r", storage_path)
+        return None
 
 
 def invoice_csv_rows(invoice: dict) -> list[dict]:

@@ -2,7 +2,9 @@ import type { Metadata } from "next";
 import { Fraunces, Inter, JetBrains_Mono } from "next/font/google";
 import Link from "next/link";
 import "./globals.css";
+import { ExportBar } from "@/components/export-bar";
 import { PRODUCT_NAME, PRODUCT_TAGLINE } from "@/lib/config";
+import { LedgerStatusProvider } from "@/lib/ledger-status-context";
 
 // Verity's three type roles (docs/FRONTEND_PLAN.md): a serif for headings
 // and the wordmark, a clean sans for UI/body, a mono for numbers, dates,
@@ -38,14 +40,17 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       className={`${heading.variable} ${ui.variable} ${data.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col bg-bg text-text">
-        <header className="border-b border-border">
-          <div className="mx-auto flex max-w-[1100px] items-center px-6 py-5">
-            <Link href="/" className="font-serif text-2xl tracking-tight text-text">
-              {PRODUCT_NAME}
-            </Link>
-          </div>
-        </header>
-        <main className="mx-auto w-full max-w-[1100px] flex-1 px-6 py-12">{children}</main>
+        <LedgerStatusProvider>
+          <header className="border-b border-border">
+            <div className="mx-auto flex max-w-[1100px] items-center px-6 py-5">
+              <Link href="/" className="font-serif text-2xl tracking-tight text-text">
+                {PRODUCT_NAME}
+              </Link>
+            </div>
+          </header>
+          <main className="mx-auto w-full max-w-[1100px] flex-1 px-6 py-12">{children}</main>
+          <ExportBar />
+        </LedgerStatusProvider>
       </body>
     </html>
   );

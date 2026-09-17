@@ -283,6 +283,26 @@ export function useRun(threadId: string) {
       });
     };
 
+    // POST /invoices and POST .../resume never populate pdf_url/trace_url
+    // (Phase 9D's detail-view links) even for a completed result - only a
+    // GET /invoices/{thread_id} does, deliberately, so those two blocking
+    // calls' responses stay identical to before (app/models.py's
+    // RunResponse docstring). Fired once, best-effort, right after either
+    // call's own dispatch, so a run watched live straight through to
+    // completion still ends up with those links without needing a reload -
+    // the exact same detail Detail would show on a cold revisit, just
+    // fetched a moment later instead of already being on the response.
+    const refreshDetailLinksIfCompleted = (run: RunResponse) => {
+      if (run.status !== "completed") return;
+      getRun(threadId)
+        .then((detailed) => dispatch({ type: "run", run: detailed }))
+        .catch(() => {
+          // Best-effort - the run already completed and is fully usable
+          // without pdf_url/trace_url, so a failed refresh here just means
+          // those two links stay absent until the user reloads.
+        });
+    };
+
     resumeRef.current = async (corrections: InvoiceCorrections) => {
       dispatch({ type: "resuming", value: true });
       stopPolling();
@@ -290,6 +310,7 @@ export function useRun(threadId: string) {
       try {
         const run = await resumeRun(threadId, corrections);
         dispatch({ type: "run", run });
+        refreshDetailLinksIfCompleted(run);
       } catch (err) {
         dispatch({ type: "error", message: err instanceof ApiError ? err.message : "Resume failed." });
       } finally {
@@ -301,7 +322,10 @@ export function useRun(threadId: string) {
     if (file) {
       openStream();
       createRun(file, threadId)
-        .then((run) => dispatch({ type: "run", run }))
+        .then((run) => {
+          dispatch({ type: "run", run });
+          refreshDetailLinksIfCompleted(run);
+        })
         .catch((err) => {
           dispatch({ type: "error", message: err instanceof ApiError ? err.message : "Upload failed." });
           startPolling();

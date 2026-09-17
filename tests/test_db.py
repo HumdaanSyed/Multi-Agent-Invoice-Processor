@@ -202,3 +202,56 @@ def test_export_status_empty_ledger_reports_zero_and_none(monkeypatch):
     status = db.export_status()
 
     assert status == {"row_count": 0, "last_written_at": None}
+
+
+# --- get_pdf_signed_url (Phase 9D's detail-view "source PDF" link) --------
+
+
+class _FakeStorageBucket:
+    def __init__(self, signed_url: str | None = None, raises: bool = False):
+        self._signed_url = signed_url
+        self._raises = raises
+        self.requested_path: str | None = None
+        self.requested_expires_in: int | None = None
+
+    def create_signed_url(self, path: str, expires_in: int):
+        if self._raises:
+            raise RuntimeError("storage unreachable")
+        self.requested_path = path
+        self.requested_expires_in = expires_in
+        return {"signedURL": self._signed_url, "signedUrl": self._signed_url}
+
+
+class _FakeStorageClient:
+    def __init__(self, bucket: _FakeStorageBucket):
+        self._bucket = bucket
+
+    def from_(self, bucket_name: str):
+        assert bucket_name == db.PDF_BUCKET
+        return self._bucket
+
+
+class _FakeClientWithStorage:
+    def __init__(self, bucket: _FakeStorageBucket):
+        self.storage = _FakeStorageClient(bucket)
+
+
+def test_get_pdf_signed_url_returns_the_signed_url(monkeypatch):
+    bucket = _FakeStorageBucket(signed_url="https://supabase.example/invoices/x.pdf?token=abc")
+    monkeypatch.setattr(db, "get_client", lambda: _FakeClientWithStorage(bucket))
+
+    url = db.get_pdf_signed_url("invoices/x.pdf", expires_in=120)
+
+    assert url == "https://supabase.example/invoices/x.pdf?token=abc"
+    assert bucket.requested_path == "invoices/x.pdf"
+    assert bucket.requested_expires_in == 120
+
+
+def test_get_pdf_signed_url_degrades_to_none_on_failure(monkeypatch):
+    """A Storage hiccup must not break the detail view around a completed
+    invoice that already persisted fine - see get_pdf_signed_url's
+    docstring."""
+    bucket = _FakeStorageBucket(raises=True)
+    monkeypatch.setattr(db, "get_client", lambda: _FakeClientWithStorage(bucket))
+
+    assert db.get_pdf_signed_url("invoices/x.pdf") is None

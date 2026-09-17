@@ -535,6 +535,28 @@ instance of any of these as high-confidence, not merely plausible:
   approach quietly only works for the one reconnect path this app doesn't
   use.
 
+- **A UI state that only ever gets *set* by an SSE event, with no fallback
+  for "no channel ever opened," silently reads as its stale initial value
+  forever.** (Phase 9D review) `web/hooks/use-run.ts`'s `ledgerStatus`
+  starts as `"unknown"` and only flips to `written`/`failed` via the SSE
+  `ledger` event - but a cold revisit of an already-`completed` run opens
+  no SSE channel at all (nothing left to subscribe to), so `ledgerStatus`
+  stays `"unknown"` forever even though the ledger write itself
+  unconditionally already happened one way or the other by the time a run
+  can reach `completed`. The persistent export bar's per-run indicator
+  (`web/app/runs/[threadId]/page.tsx`) originally treated "not written and
+  not failed" as `"pending"`, which meant a `completed` run revisited cold
+  showed a permanent, actively wrong "still writing" instead of nothing.
+  Fixed by treating `status === "completed"` as its own branch (clear the
+  indicator) rather than falling through to the pending case, checked
+  *before* the generic "anything non-terminal is pending" fallback.
+  General shape: a status derived only from a live/streamed signal is
+  correct exactly as long as that signal is guaranteed to eventually
+  arrive - once there's a code path where it provably never will (SSE's
+  own "nothing to subscribe to" case, here), treat the absence as "unknown,
+  say nothing" for that specific case, not as whatever the default/pending
+  value happens to be.
+
 ## Known intentional patterns — do not re-flag
 
 - The `invoice_exports` Postgres table (Phase 8.6, replacing the earlier
