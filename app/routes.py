@@ -318,7 +318,15 @@ async def stream_invoice_run(thread_id: str, request: Request) -> StreamingRespo
             raise ThreadNotFound(f"No run found for thread_id={thread_id!r}.", thread_id=thread_id)
         generator = _async_snapshot_chunks(derived)
     else:
-        raw_last_event_id = request.headers.get("last-event-id")
+        # The header is what a browser's own EventSource auto-reconnect
+        # sends - but this app never relies on that (it always opens a
+        # fresh connection itself, e.g. after a resume, rather than letting
+        # the native reconnect fire), and EventSource gives no way to set a
+        # custom header on a manually-constructed connection. The query
+        # param is the standard workaround, so a client that tracks its own
+        # last-seen id (web/hooks/use-run.ts) can still avoid replaying
+        # history it already has.
+        raw_last_event_id = request.headers.get("last-event-id") or request.query_params.get("last_event_id")
         try:
             last_event_id = int(raw_last_event_id) if raw_last_event_id is not None else None
         except ValueError:

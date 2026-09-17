@@ -16,14 +16,19 @@ export default function RunPage({ params }: PageProps<"/runs/[threadId]">) {
     useRun(threadId);
 
   const status = run?.status;
-  // The review form takes over, exclusively, only once needs_review has
-  // fully settled (the initial staggered reveal is done) and no resume is
-  // in flight. Everything else - including a resume, which re-enters
-  // validation and re-runs the exact same reveal (docs/FRONTEND_PLAN.md's
-  // Phase 9C instruction 6) - shows the live extraction/validation grid,
-  // matching how needs_review's own initial reveal already worked in
-  // Phase 9B before this form existed.
-  const showReviewForm = status === "needs_review" && !checksSettling && !resuming;
+  // Deliberately NOT gated on `!resuming`: a resume attempt that never
+  // actually re-validates (the corrected invoice fails Pydantic validation
+  // server-side before the graph even runs, so no SSE events ever arrive)
+  // must not unmount ReviewForm - checksSettling only flips true once a
+  // real validation_start/check stream starts, so staying mounted through
+  // a failed, event-less resume keeps the user's typed corrections instead
+  // of remounting a fresh form from the still-uncorrected invoice. A
+  // resume that DOES reach the graph republishes validation_start, which
+  // flips checksSettling true and swaps to the live grid below (re-running
+  // the exact same reveal - docs/FRONTEND_PLAN.md's Phase 9C instruction
+  // 6) - once it settles again, a genuinely new ReviewForm mounts from the
+  // freshly re-validated invoice, which is what should happen then.
+  const showReviewForm = status === "needs_review" && !checksSettling;
   const showLiveView = status !== "skipped" && status !== "failed" && !showReviewForm;
   const failedChecks = checks.filter((check) => !check.skipped && !check.passed);
 
@@ -31,7 +36,13 @@ export default function RunPage({ params }: PageProps<"/runs/[threadId]">) {
     <div className="flex flex-col gap-6">
       <StageIndicator stage={stage} />
 
-      {error && <p className="text-sm text-error">{error}</p>}
+      {/* Framed as "your changes weren't saved" rather than a bare error
+          dump - the message itself can still be a raw backend validation
+          string (e.g. a Pydantic error) until that's addressed server-side,
+          but ReviewForm now stays mounted through this (see showReviewForm
+          above), so the corrections that triggered it aren't lost either
+          way. */}
+      {error && <p className="text-sm text-error">Couldn&apos;t save your changes: {error}</p>}
 
       {status === "skipped" && (
         <div className="rounded-lg border border-border bg-surface p-6">

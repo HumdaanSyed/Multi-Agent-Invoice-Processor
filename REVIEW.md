@@ -487,6 +487,54 @@ instance of any of these as high-confidence, not merely plausible:
   used to decide when *it* was done (here: the connection actually
   closing) rather than guessing from event type alone.
 
+- **A shared "current connection" variable reassigned without closing the
+  one it replaces.** (Phase 9C review) `web/hooks/use-run.ts`'s
+  `openStream()` pointed `closeStream`/`lastEventType` at a brand-new
+  `EventSource` without closing the previous one first - harmless when
+  only one `openStream()` call ever happened per mount, but `resume()`
+  added a second one in the same effect lifetime. If the old (still-alive,
+  waiting for the server's close to be noticed) connection's `onerror`
+  fired *after* `resume()` had already reassigned these shared variables,
+  it closed the **new** stream instead of the dead old one, using
+  `lastEventType` from whichever stream happened to update it last. Fixed
+  by having `openStream()` close whatever it's replacing first. General
+  shape: a "the current one" variable shared across multiple things that
+  can each independently trigger a callback referencing it (here, two
+  `EventSource`s' `onerror`, both bound to the same closure) needs the old
+  one torn down *before* the variable moves on, not left to clean up
+  itself asynchronously.
+
+- **A needs_review/interrupted run's SSE channel being open, not closed,
+  treated the same as a genuinely finished run's.** (Phase 9C review)
+  `isTerminal()` correctly means "stop polling, this run has a final API
+  status" but was also used to decide whether to open an SSE stream at
+  all - and per docs/api.md, `interrupted` closes only the *connection*,
+  deliberately leaving the *channel* open for a resume. A revisit of a
+  `needs_review` run (a reload, a shared link) with no in-flight upload
+  skipped opening a stream entirely, and since `ReviewForm`'s failed-check
+  list/amber fields come *only* from replayed `check` SSE events, the
+  review screen rendered blank - every field read-only, no visible reason
+  for review. Fixed by treating `needs_review` as an explicit exception to
+  "isTerminal means don't bother with SSE." General shape: an API-level
+  "final status" and a "is there anything left to subscribe to" question
+  can look like the same check but aren't - conflating them silently
+  breaks whichever call site actually needed the second one.
+
+- **`EventSource` can't set request headers, so `Last-Event-ID` needs a
+  query-param fallback for a client that reconnects itself.** (Phase 9C
+  review) `app/routes.py` only read the `Last-Event-ID` *header*, which a
+  browser auto-populates only on its own native reconnect - never on a
+  fresh `new EventSource(url)`, which is all this app ever constructs
+  (deliberately, for full control over when a stream reopens - e.g. after
+  a resume). So every reconnect replayed the channel's entire history from
+  the start, growing with every resume in a run's lifetime. Fixed by also
+  accepting `?last_event_id=` as a query param (`web/lib/api.ts`'s
+  `subscribeToRun` tracks the SSE `id:` field via `MessageEvent.lastEventId`
+  and passes it back in on the next connection). Worth remembering for any
+  future EventSource-based reconnect logic in this codebase: the header-only
+  approach quietly only works for the one reconnect path this app doesn't
+  use.
+
 ## Known intentional patterns — do not re-flag
 
 - The `invoice_exports` Postgres table (Phase 8.6, replacing the earlier

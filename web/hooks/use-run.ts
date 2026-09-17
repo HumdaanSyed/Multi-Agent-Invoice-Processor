@@ -168,6 +168,15 @@ export function useRun(threadId: string) {
     // apart from a genuine dropped connection - see its own comment.
     let lastEventType: RunEvent["type"] | null = null;
 
+    // The last-seen SSE id, kept across every openStream() call within this
+    // mount (unlike lastEventType, which resets per connection) - passed
+    // back in on the next connection so the server skips replaying history
+    // this tab has already processed (events.py's per-run history grows
+    // with every resume; the id it needs isn't sent as a header, since
+    // EventSource gives no way to set one on a connection this code opens
+    // itself - see api.ts's subscribeToRun).
+    let lastSeenEventId: string | undefined;
+
     // Client-side stagger for revealing check results (~200ms apart, per
     // docs/FRONTEND_PLAN.md - validation itself runs in milliseconds
     // server-side, never delayed there). Kept as a plain queue + timer
@@ -256,10 +265,22 @@ export function useRun(threadId: string) {
     };
 
     const openStream = () => {
-      // Reset so a stale lastEventType from a just-closed connection can't
-      // be mistaken for this fresh one's outcome if it fails immediately.
+      // Close whatever connection is already open first - resume() can
+      // call this while an earlier connection (e.g. one that already
+      // received "interrupted" but hasn't had its own onerror fire yet,
+      // since that only happens once the browser notices the server ended
+      // it) is technically still alive. Leaving it open let its eventual
+      // onerror fire against lastEventType/closeStream this fresh call had
+      // already reset, sometimes closing the NEW stream instead of the
+      // dead old one and falling back to polling mid-resume.
+      closeStream?.();
+      // Reset so a stale lastEventType from the just-closed connection
+      // can't be mistaken for this fresh one's outcome if it fails
+      // immediately.
       lastEventType = null;
-      closeStream = subscribeToRun(threadId, onEvent, onTransportError);
+      closeStream = subscribeToRun(threadId, onEvent, onTransportError, lastSeenEventId, (id) => {
+        lastSeenEventId = id;
+      });
     };
 
     resumeRef.current = async (corrections: InvoiceCorrections) => {
@@ -300,7 +321,16 @@ export function useRun(threadId: string) {
       getRun(threadId)
         .then((run) => {
           dispatch({ type: "run", run });
-          if (!cancelled && (hasInFlightUpload || !isTerminal(run.status))) {
+          // needs_review is "terminal" for isTerminal()'s purpose (stop
+          // polling, show the review form) but NOT for the channel - per
+          // docs/api.md, interrupted only closes the connection, deliberately
+          // leaving the channel open for a resume. A revisit (a reload, a
+          // shared link) with no in-flight upload still needs a stream here:
+          // ReviewForm's failed-check list/amber fields come entirely from
+          // replayed "check" events, which never arrive without one, leaving
+          // the review screen blank with no visible reason for review.
+          const needsChannel = hasInFlightUpload || run.status === "needs_review" || !isTerminal(run.status);
+          if (!cancelled && needsChannel) {
             openStream();
           }
         })
