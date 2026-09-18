@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Fraunces, Inter, JetBrains_Mono } from "next/font/google";
+import { connection } from "next/server";
 import Link from "next/link";
 import "./globals.css";
 import { ExportBar } from "@/components/export-bar";
@@ -33,12 +34,28 @@ export const metadata: Metadata = {
   description: PRODUCT_TAGLINE,
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default async function RootLayout({ children }: LayoutProps<"/">) {
+  // Opts the whole tree into dynamic rendering so API_PUBLIC_URL is read at
+  // request time (docs: environment-variables.md, "Runtime Environment
+  // Variables") - one prebuilt image, different backend per deployment.
+  await connection();
+  const apiPublicUrl = process.env.API_PUBLIC_URL;
+
   return (
     <html
       lang="en"
       className={`${heading.variable} ${ui.variable} ${data.variable} h-full antialiased`}
     >
+      <head>
+        {apiPublicUrl && (
+          <script
+            // "<" escaped so a hostile env value can't close the tag.
+            dangerouslySetInnerHTML={{
+              __html: `window.__VERITY_API_BASE_URL__=${JSON.stringify(apiPublicUrl).replace(/</g, "\\u003c")};`,
+            }}
+          />
+        )}
+      </head>
       <body className="min-h-full flex flex-col bg-bg text-text">
         <LedgerStatusProvider>
           <header className="border-b border-border">

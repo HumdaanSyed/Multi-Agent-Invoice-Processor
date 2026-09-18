@@ -59,6 +59,10 @@ new finding to explain from scratch — cite this file.
 These exact shapes have shown up in prior reviews of this repo. Treat a new
 instance of any of these as high-confidence, not merely plausible:
 
+(Entries below that cite `frontend/` or Streamlit describe the demo UI
+retired in Phase 9E - that code no longer exists, but each shape is kept for
+the general lesson, which applies to any UI layer or multi-service image.)
+
 - **Unconditional persistence after a corrective/retry path.** A node or
   function reachable after "the human/system tried to fix it" that skips
   straight to a write instead of re-validating the final data.
@@ -556,6 +560,24 @@ instance of any of these as high-confidence, not merely plausible:
   own "nothing to subscribe to" case, here), treat the absence as "unknown,
   say nothing" for that specific case, not as whatever the default/pending
   value happens to be.
+
+- **A deployment-specific URL baked into a published image.** (Phase 9E)
+  `NEXT_PUBLIC_*` variables are inlined into client JS at `next build`, so
+  an image built once in CI (the only option on a 1GB EC2 box, where
+  `next build` OOMs - CLAUDE.md's pitfall) is frozen to whatever backend URL
+  the CI build saw. Fixed by reading `API_PUBLIC_URL` at *request* time in
+  `app/layout.tsx` (opting into dynamic rendering via `connection()`) and
+  injecting it as `window.__VERITY_API_BASE_URL__` for the browser, with
+  `web/lib/config.ts` as the single resolver. Two related traps found in
+  the same change: a browser-facing URL and a server-to-server URL are
+  genuinely different inside a container network (`localhost:8000` vs
+  `backend:8000`), so they need separate variables - and a client component
+  that renders a URL into an `href` during SSR must resolve the
+  *browser-facing* one on the server too, or hydration keeps the internal
+  address in the DOM (React doesn't patch mismatched attributes). General
+  shape: when one artifact is built once and run in many places, anything
+  environment-specific must be read at run time, and anything read on both
+  sides of a network boundary needs a per-side value.
 
 ## Known intentional patterns — do not re-flag
 

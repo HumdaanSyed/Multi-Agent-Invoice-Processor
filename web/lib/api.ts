@@ -5,7 +5,7 @@
  * (app/models.py's ErrorResponse, see app/errors.py).
  */
 
-import { API_BASE_URL } from "./config";
+import { API_BASE_URL, SERVER_API_BASE_URL } from "./config";
 import type {
   ErrorResponse,
   ExportStatusResponse,
@@ -37,7 +37,10 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, init);
+  // Server components (the home page) fetch from the Next.js server, which
+  // may reach the backend at a different address than the browser does.
+  const baseUrl = typeof window === "undefined" ? SERVER_API_BASE_URL : API_BASE_URL;
+  const response = await fetch(`${baseUrl}${path}`, init);
   if (!response.ok) {
     // Every error this API raises deliberately (app/errors.py) - plus
     // FastAPI's own validation errors - comes back as this one JSON shape.

@@ -4,19 +4,21 @@
     {
       "name": "fastapi-backend",
       "runtimeExecutable": "uv",
-      "runtimeArgs": ["run", "uvicorn", "app.main:app", "--reload"],
+      "runtimeArgs": [
+        "run",
+        "uvicorn",
+        "app.main:app",
+        "--reload"
+      ],
       "port": 8000
-    },
-    {
-      "name": "streamlit-frontend",
-      "runtimeExecutable": "uv",
-      "runtimeArgs": ["run", "streamlit", "run", "frontend/app.py", "--server.headless", "true"],
-      "port": 8501
     },
     {
       "name": "web-frontend",
       "runtimeExecutable": "bash",
-      "runtimeArgs": ["-c", "cd web && PORT=3100 npm run dev"],
+      "runtimeArgs": [
+        "-c",
+        "cd web && PORT=3100 npm run dev"
+      ],
       "port": 3100
     }
   ]
