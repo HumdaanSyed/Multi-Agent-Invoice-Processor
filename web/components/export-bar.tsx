@@ -1,19 +1,14 @@
 "use client";
 
 import { Download } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { buttonVariants } from "@/components/ui/button";
 import { useLedgerStatusContext } from "@/lib/ledger-status-context";
 import { exportCsvUrl, getExportStatus } from "@/lib/api";
 import type { ExportStatusResponse } from "@/lib/types";
+import { formatDateTime } from "@/lib/utils";
 
 const POLL_INTERVAL_MS = 20000;
-
-function formatWrittenAt(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-}
 
 /**
  * A slim footer present on every screen (docs/FRONTEND_PLAN.md's Phase 9D),
@@ -34,26 +29,30 @@ export function ExportBar() {
   const { runLedgerStatus } = useLedgerStatusContext();
   const [status, setStatus] = useState<ExportStatusResponse | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
+  // Shared between both effects below so whichever fetch was issued most
+  // recently is the only one allowed to apply its response - without this,
+  // the periodic poll and the "written" refetch (independent effects, each
+  // firing its own getExportStatus()) can resolve out of order and let an
+  // older response overwrite a fresher one, transiently regressing the row
+  // count/last-written-at until the next poll tick corrects it.
+  const latestRequestIdRef = useRef(0);
 
   useEffect(() => {
-    let cancelled = false;
     const load = () => {
+      const requestId = ++latestRequestIdRef.current;
       getExportStatus()
         .then((response) => {
-          if (cancelled) return;
+          if (requestId !== latestRequestIdRef.current) return;
           setStatus(response);
           setLoadFailed(false);
         })
         .catch(() => {
-          if (!cancelled) setLoadFailed(true);
+          if (requestId === latestRequestIdRef.current) setLoadFailed(true);
         });
     };
     load();
     const interval = setInterval(load, POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
+    return () => clearInterval(interval);
   }, []);
 
   // A ledger row was just (or is about to be) added for the active run -
@@ -61,8 +60,11 @@ export function ExportBar() {
   // row count to catch up.
   useEffect(() => {
     if (runLedgerStatus !== "written") return;
+    const requestId = ++latestRequestIdRef.current;
     getExportStatus()
-      .then(setStatus)
+      .then((response) => {
+        if (requestId === latestRequestIdRef.current) setStatus(response);
+      })
       .catch(() => {});
   }, [runLedgerStatus]);
 
@@ -81,7 +83,7 @@ export function ExportBar() {
               One shared ledger of every processed invoice:{" "}
               <span className="font-mono text-text">{status.row_count}</span>
               {status.row_count === 1 ? " row" : " rows"}
-              {status.last_written_at && <>, last written {formatWrittenAt(status.last_written_at)}</>}.
+              {status.last_written_at && <>, last written {formatDateTime(status.last_written_at)}</>}.
             </>
           )}
           {runLedgerStatus === "pending" && <span className="ml-2 text-text-muted">· This run: writing…</span>}

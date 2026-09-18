@@ -55,6 +55,7 @@ class GraphState(TypedDict):
     status: str
     messages: Annotated[list, add_messages]
     pdf_storage_path: Optional[str]
+    ledger_status: Optional[str]
 
 
 logger = logging.getLogger("invoice_agent.graph")
@@ -258,11 +259,16 @@ def output(state: GraphState, config: Optional[RunnableConfig] = None) -> dict:
             invoice.get("vendor_name"),
             invoice.get("invoice_number"),
         )
-        _publish(config, "ledger", status="failed")
+        ledger_status = "failed"
     else:
-        _publish(config, "ledger", status="written")
+        ledger_status = "written"
+    _publish(config, "ledger", status=ledger_status)
 
-    return {"status": "completed", "pdf_storage_path": pdf_storage_path}
+    # Returned (not just published over SSE) so a cold revisit of a
+    # completed run - no SSE channel ever opens for one, see events.py -
+    # still has a durable answer to "did this reach the ledger" instead of
+    # only a live subscriber ever finding out (REVIEW.md).
+    return {"status": "completed", "pdf_storage_path": pdf_storage_path, "ledger_status": ledger_status}
 
 
 def route_after_classification(state: GraphState) -> str:

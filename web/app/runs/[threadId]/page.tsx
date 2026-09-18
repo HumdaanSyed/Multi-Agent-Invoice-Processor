@@ -23,29 +23,28 @@ export default function RunPage({ params }: PageProps<"/runs/[threadId]">) {
   // Mirrors this run's ledger status into the persistent export bar
   // (components/export-bar.tsx), which renders above this page in the
   // layout and has no other way to see state that lives inside useRun().
-  // "pending" only while genuinely still active (processing, or a resume
-  // in flight for a needs_review run) - the SSE "ledger" event (which
-  // flips ledgerStatus to written/failed) only ever fires from output(),
-  // so a skipped/failed run (which never reaches output()) has nothing to
-  // report. A *completed* run whose ledger event was never seen (a cold
-  // revisit - no SSE channel opens for an already-terminal run with
-  // nothing in flight, see hooks/use-run.ts) must NOT fall back to
-  // "pending" either: the write already happened one way or the other by
-  // the time a run can even reach "completed", so claiming it's still in
-  // progress would be actively wrong, not just uninformative - clear the
-  // indicator instead, same as skipped/failed. Cleanup clears it on
-  // navigating away, so the bar doesn't keep showing a stale "this run"
-  // status once this page is no longer active.
+  // Prefers the live, SSE-derived ledgerStatus (it resolves first for a run
+  // watched live, and doesn't need run to have been refetched yet), falling
+  // back to run.ledger_status - the durable field RunResponse now always
+  // carries for a completed run, from any endpoint (app/models.py) - for a
+  // cold revisit, where no SSE channel ever opens and ledgerStatus would
+  // otherwise stay "unknown" forever. "pending" only while genuinely still
+  // active (processing, or a resume in flight for a needs_review run) - a
+  // skipped/failed run never reaches output() and has nothing to report.
+  // Cleanup clears it on navigating away, so the bar doesn't keep showing a
+  // stale "this run" status once this page is no longer active.
   useEffect(() => {
-    if (ledgerStatus === "written" || ledgerStatus === "failed") {
-      setRunLedgerStatus(ledgerStatus);
+    const knownLedgerStatus =
+      ledgerStatus === "written" || ledgerStatus === "failed" ? ledgerStatus : (run?.ledger_status ?? null);
+    if (knownLedgerStatus === "written" || knownLedgerStatus === "failed") {
+      setRunLedgerStatus(knownLedgerStatus);
     } else if (status === "skipped" || status === "failed" || status === "completed") {
       setRunLedgerStatus(null);
     } else if (status !== undefined) {
       setRunLedgerStatus("pending");
     }
     return () => setRunLedgerStatus(null);
-  }, [status, ledgerStatus, setRunLedgerStatus]);
+  }, [status, ledgerStatus, run?.ledger_status, setRunLedgerStatus]);
 
   // Deliberately NOT gated on `!resuming`: a resume attempt that never
   // actually re-validates (the corrected invoice fails Pydantic validation
@@ -117,6 +116,7 @@ export default function RunPage({ params }: PageProps<"/runs/[threadId]">) {
         <InvoiceDetail
           threadId={threadId}
           invoice={run.invoice}
+          validation={run.validation}
           file={file}
           pdfUrl={run.pdf_url}
           traceUrl={run.trace_url}

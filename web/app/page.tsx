@@ -4,6 +4,7 @@ import { UploadZone } from "@/components/upload-zone";
 import { getHealth, listRuns } from "@/lib/api";
 import { API_BASE_URL, PRODUCT_TAGLINE } from "@/lib/config";
 import type { RunSummary } from "@/lib/types";
+import { formatDateTime } from "@/lib/utils";
 
 // This calls a live backend on every request - without this, Next.js has
 // no dynamic API to key off and would prerender the page once at build
@@ -38,13 +39,6 @@ async function loadRecentRuns(): Promise<RunSummary[] | null> {
   }
 }
 
-function formatCreatedAt(iso: string | null | undefined): string {
-  if (!iso) return "";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-}
-
 /** Every doc_type except "skipped" is an invoice by construction - the
  * router sends anything else straight to END before doc_type is ever set
  * on the run itself (see app/service.py's derive_status), so "skipped" is
@@ -75,7 +69,7 @@ function RecentRuns({ runs }: { runs: RunSummary[] | null }) {
           <RunStatusDot status={run.status} />
           <span className="text-text-muted">{docTypeLabel(run)}</span>
           <span className="font-mono text-text-muted">{run.thread_id}</span>
-          <span className="text-text-muted">{formatCreatedAt(run.created_at)}</span>
+          <span className="text-text-muted">{formatDateTime(run.created_at)}</span>
         </Link>
       ))}
     </div>

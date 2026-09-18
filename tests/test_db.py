@@ -8,6 +8,8 @@ route-level mocks in tests/test_api_export.py, which monkeypatch these
 functions themselves and so never run their real bodies.
 """
 
+import pytest
+
 import invoice_agent.db as db
 from invoice_agent.db import CSV_FIELDS, LEDGER_CSV_FIELDS, export_ledger_row_to_csv_rows, invoice_csv_rows
 
@@ -236,6 +238,17 @@ class _FakeClientWithStorage:
         self.storage = _FakeStorageClient(bucket)
 
 
+@pytest.fixture(autouse=True)
+def _clear_signed_url_cache():
+    """get_pdf_signed_url caches by storage_path at module scope (see its
+    own docstring) - without clearing it, a URL cached by one test for a
+    given path would be silently reused by a later test using the same
+    path, regardless of that test's own fake client/bucket."""
+    db._signed_url_cache.clear()
+    yield
+    db._signed_url_cache.clear()
+
+
 def test_get_pdf_signed_url_returns_the_signed_url(monkeypatch):
     bucket = _FakeStorageBucket(signed_url="https://supabase.example/invoices/x.pdf?token=abc")
     monkeypatch.setattr(db, "get_client", lambda: _FakeClientWithStorage(bucket))
@@ -255,3 +268,85 @@ def test_get_pdf_signed_url_degrades_to_none_on_failure(monkeypatch):
     monkeypatch.setattr(db, "get_client", lambda: _FakeClientWithStorage(bucket))
 
     assert db.get_pdf_signed_url("invoices/x.pdf") is None
+
+
+def test_get_pdf_signed_url_reuses_cached_url_without_a_second_call(monkeypatch):
+    bucket = _FakeStorageBucket(signed_url="https://supabase.example/invoices/y.pdf?token=abc")
+    monkeypatch.setattr(db, "get_client", lambda: _FakeClientWithStorage(bucket))
+
+    first = db.get_pdf_signed_url("invoices/y.pdf")
+    bucket._raises = True  # a second real call would now fail
+    second = db.get_pdf_signed_url("invoices/y.pdf")
+
+    assert first == second == "https://supabase.example/invoices/y.pdf?token=abc"
+
+
+def test_get_pdf_signed_url_remints_once_the_cached_entry_expires(monkeypatch):
+    bucket = _FakeStorageBucket(signed_url="https://supabase.example/invoices/z.pdf?token=first")
+    monkeypatch.setattr(db, "get_client", lambda: _FakeClientWithStorage(bucket))
+    db.get_pdf_signed_url("invoices/z.pdf", expires_in=120)
+
+    # Simulate the cached entry having passed its (expires_in - 60s) deadline.
+    url, _deadline = db._signed_url_cache["invoices/z.pdf"]
+    db._signed_url_cache["invoices/z.pdf"] = (url, 0.0)
+    bucket._signed_url = "https://supabase.example/invoices/z.pdf?token=second"
+
+    assert db.get_pdf_signed_url("invoices/z.pdf", expires_in=120) == "https://supabase.example/invoices/z.pdf?token=second"
+
+
+# --- get_invoice_pdf_storage_path (fallback for a pre-Phase-9D checkpoint) -
+
+
+class _FakeInvoicesQuery:
+    def __init__(self, rows: list[dict]):
+        self._rows = rows
+        self._filters: dict[str, str] = {}
+
+    def select(self, *_args, **_kwargs):
+        return self
+
+    def eq(self, field: str, value: str):
+        self._filters[field] = value
+        return self
+
+    def limit(self, _n: int):
+        return self
+
+    def execute(self):
+        matches = [
+            row
+            for row in self._rows
+            if all(row.get(field) == value for field, value in self._filters.items())
+        ]
+        return _FakeResult(matches)
+
+
+class _FakeInvoicesClient:
+    def __init__(self, rows: list[dict]):
+        self._rows = rows
+
+    def table(self, name: str):
+        assert name == "invoices"
+        return _FakeInvoicesQuery(self._rows)
+
+
+def test_get_invoice_pdf_storage_path_finds_the_matching_row(monkeypatch):
+    rows = [{"vendor_name": "Acme Co", "invoice_number": "INV-1", "pdf_storage_path": "invoices/abc.pdf"}]
+    monkeypatch.setattr(db, "get_client", lambda: _FakeInvoicesClient(rows))
+
+    assert db.get_invoice_pdf_storage_path("Acme Co", "INV-1") == "invoices/abc.pdf"
+
+
+def test_get_invoice_pdf_storage_path_none_when_no_row_matches(monkeypatch):
+    monkeypatch.setattr(db, "get_client", lambda: _FakeInvoicesClient([]))
+
+    assert db.get_invoice_pdf_storage_path("Acme Co", "INV-1") is None
+
+
+def test_get_invoice_pdf_storage_path_degrades_to_none_on_failure(monkeypatch):
+    def _raise():
+        raise RuntimeError("supabase unreachable")
+
+    monkeypatch.setattr(db, "get_client", _raise)
+
+    assert db.get_invoice_pdf_storage_path("Acme Co", "INV-1") is None

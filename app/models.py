@@ -56,13 +56,27 @@ class RunResponse(BaseModel):
     """POST /invoices, GET /invoices/{thread_id}, and the resume endpoint's
     response shape. Populated fields by `status`:
       - needs_review: invoice + flags
-      - completed:    invoice + validation. `pdf_url`/`trace_url` are also
-                       only ever set for `completed`, and only by
-                       `GET /invoices/{thread_id}` (app/routes.py) - both
-                       are best-effort convenience links for the frontend's
-                       read-only detail view (docs/FRONTEND_PLAN.md's Phase
-                       9D), generated fresh per request rather than stored,
-                       so neither ever appears on POST/resume's response.
+      - completed:    invoice + validation + ledger_status. `pdf_url`/
+                       `trace_url` are the one exception to "same envelope
+                       no matter which endpoint produced it": both are only
+                       ever set by `GET /invoices/{thread_id}` (app/routes.py),
+                       never by POST /invoices or the resume endpoint, even
+                       though both of those can also return a `completed`
+                       response. That's deliberate, not an oversight: both
+                       links need an external call (a Supabase Storage
+                       signed-URL mint, a Langfuse trace-id lookup) that
+                       must never be added to POST /invoices's or resume's
+                       request path - both already block for the full
+                       extraction/re-validation (docs/api.md's "Why
+                       blocking, not 202 + polling" already flags this as
+                       at risk of a slow proxy's own timeout), so an extra
+                       best-effort call is asked for separately via one
+                       follow-up GET (web/hooks/use-run.ts's
+                       refreshDetailLinksIfCompleted) instead. `ledger_status`
+                       has no such cost - it's plain state already sitting
+                       in GraphState by the time any of the three endpoints
+                       builds this response - so it's populated everywhere,
+                       unlike the two links.
       - skipped:      doc_type (router sent a receipt/other straight to END)
       - failed:       failed_at_node only - never the raw error message,
                        which embeds vendor_name/invoice_number/storage paths
@@ -77,6 +91,7 @@ class RunResponse(BaseModel):
     doc_type: Optional[str] = None
     invoice: Optional[Invoice] = None
     validation: Optional[dict] = None
+    ledger_status: Optional[Literal["written", "failed"]] = None
     flags: Optional[list[str]] = None
     current_node: Optional[str] = None
     failed_at_node: Optional[str] = None

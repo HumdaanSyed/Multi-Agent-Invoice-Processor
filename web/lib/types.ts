@@ -28,15 +28,40 @@ export interface Invoice {
 // Mirrors app/models.py
 export type RunStatus = "processing" | "needs_review" | "completed" | "skipped" | "failed";
 
+/** Mirrors invoice_agent/validate.py's ValidationResult/CheckResult -
+ * `checks` here is the same shape as the SSE CheckEvent list (minus
+ * `type`/`thread_id`), always present for a completed run regardless of
+ * source (unlike the streamed events, which only ever arrive for a run
+ * this tab watched live) - see components/invoice-detail.tsx. */
+export interface ValidationCheckResult {
+  check_id: CheckId;
+  label: string;
+  passed: boolean;
+  detail?: string | null;
+  skipped?: boolean;
+}
+
+export interface ValidationResult {
+  passed: boolean;
+  flags: string[];
+  needs_review: boolean;
+  checks: ValidationCheckResult[];
+}
+
 export interface RunResponse {
   thread_id: string;
   status: RunStatus;
   doc_type?: string | null;
   invoice?: Invoice | null;
-  validation?: Record<string, unknown> | null;
+  validation?: ValidationResult | null;
   flags?: string[] | null;
   current_node?: string | null;
   failed_at_node?: string | null;
+  /** Populated for a completed run on every endpoint that reaches one
+   * (POST /invoices, resume, and GET) - plain GraphState, no extra I/O
+   * needed, unlike pdf_url/trace_url below. Durable, so it survives a cold
+   * revisit (a reload, a bookmark) unlike the SSE-only "ledger" event. */
+  ledger_status?: "written" | "failed" | null;
   /** Only ever set by GET /invoices/{thread_id} for a completed run - see
    * app/models.py's RunResponse docstring. Never present on POST/resume's
    * response, even for the same completed run. */

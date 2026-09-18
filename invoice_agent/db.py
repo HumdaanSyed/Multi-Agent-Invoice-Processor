@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
@@ -130,9 +131,54 @@ def upload_pdf(path: str | Path) -> str:
     return storage_path
 
 
-def get_pdf_signed_url(storage_path: str, expires_in: int = 3600) -> Optional[str]:
+def get_invoice_pdf_storage_path(vendor_name: str, invoice_number: str) -> Optional[str]:
+    """Fallback lookup of a completed invoice's `pdf_storage_path` straight
+    from the `invoices` table, for a run whose checkpoint predates this
+    column existing in `GraphState` (`invoice_agent/graph.py`'s `output()`
+    only started returning it in Phase 9D) - `insert_invoice` has always
+    written this column, independent of graph state, so every historical
+    completed invoice already has one on file even though its checkpoint
+    doesn't. Best-effort like `get_pdf_signed_url`: degrades to None rather
+    than raising, since this only ever backs an optional detail-view link.
+    """
+    try:
+        response = (
+            get_client()
+            .table("invoices")
+            .select("pdf_storage_path")
+            .eq("vendor_name", vendor_name)
+            .eq("invoice_number", invoice_number)
+            .limit(1)
+            .execute()
+        )
+        return response.data[0]["pdf_storage_path"] if response.data else None
+    except Exception:
+        logger.exception(
+            "get_invoice_pdf_storage_path failed for vendor_name=%r invoice_number=%r",
+            vendor_name,
+            invoice_number,
+        )
+        return None
+
+
+# storage_path -> (signed url, monotonic deadline). Signed URLs are cheap to
+# reuse for their whole lifetime (docs/api.md's detail view re-fetches one on
+# every page load/revisit) - process-lifetime, unbounded-but-tiny (one entry
+# per completed invoice ever viewed, a few hundred bytes each), acceptable
+# for a portfolio demo's traffic, same tradeoff already accepted for
+# GraphService's per-thread_id lock dict in app/service.py.
+_signed_url_cache: dict[str, tuple[str, float]] = {}
+
+
+def get_pdf_signed_url(storage_path: str, expires_in: int = 86400) -> Optional[str]:
     """A time-limited URL into the private `invoice-pdfs` bucket, for the
     detail view's "source PDF" link (docs/FRONTEND_PLAN.md's Phase 9D).
+    Cached in-process for most of `expires_in` (refreshed 60s before actual
+    expiry, so a client never receives a URL that's about to die mid-use) -
+    otherwise every detail-page view/revisit would mint a fresh one via a
+    real Supabase Storage HTTP call for a URL that was already valid.
+    Defaults to 24h, not Supabase's own 1h default, so a tab left open or a
+    bookmarked/shared link doesn't go dead within a single sitting.
 
     Best-effort: unlike `upload_pdf`/`insert_invoice` (which must raise so a
     real persistence failure is never silently swallowed - see
@@ -142,12 +188,18 @@ def get_pdf_signed_url(storage_path: str, expires_in: int = 3600) -> Optional[st
     detail view for an invoice that otherwise persisted fine, so any
     failure degrades to None rather than raising.
     """
+    cached = _signed_url_cache.get(storage_path)
+    if cached is not None and time.monotonic() < cached[1]:
+        return cached[0]
     try:
         response = get_client().storage.from_(PDF_BUCKET).create_signed_url(storage_path, expires_in)
-        return response.get("signedUrl")
+        url = response.get("signedUrl")
     except Exception:
         logger.exception("get_pdf_signed_url failed for storage_path=%r", storage_path)
         return None
+    if url:
+        _signed_url_cache[storage_path] = (url, time.monotonic() + expires_in - 60)
+    return url
 
 
 def invoice_csv_rows(invoice: dict) -> list[dict]:
