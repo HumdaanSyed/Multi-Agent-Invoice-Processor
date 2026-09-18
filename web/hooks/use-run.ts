@@ -283,6 +283,33 @@ export function useRun(threadId: string) {
       });
     };
 
+    // POST /invoices and POST .../resume never populate pdf_url/trace_url
+    // (Phase 9D's detail-view links) even for a completed result - only a
+    // GET /invoices/{thread_id} does, deliberately, since both links need
+    // an external call neither blocking endpoint should be made to wait on
+    // (app/models.py's RunResponse docstring). Fired once, best-effort,
+    // right after either call's own dispatch, so a run watched live
+    // straight through to completion still ends up with those links
+    // without needing a reload - the exact same detail Detail would show
+    // on a cold revisit, just fetched a moment later instead of already
+    // being on the response. stopPolling() first: without it, a polling
+    // fallback started by an unrelated SSE hiccup earlier in this same
+    // resume/create call (see startPolling below) could still be in
+    // flight, and its own (pdf_url/trace_url-less) getRun() response
+    // landing after this one would silently overwrite it - whichever
+    // dispatch({type:"run"}) lands last wins.
+    const refreshDetailLinksIfCompleted = (run: RunResponse) => {
+      if (run.status !== "completed") return;
+      stopPolling();
+      getRun(threadId)
+        .then((detailed) => dispatch({ type: "run", run: detailed }))
+        .catch(() => {
+          // Best-effort - the run already completed and is fully usable
+          // without pdf_url/trace_url, so a failed refresh here just means
+          // those two links stay absent until the user reloads.
+        });
+    };
+
     resumeRef.current = async (corrections: InvoiceCorrections) => {
       dispatch({ type: "resuming", value: true });
       stopPolling();
@@ -290,6 +317,7 @@ export function useRun(threadId: string) {
       try {
         const run = await resumeRun(threadId, corrections);
         dispatch({ type: "run", run });
+        refreshDetailLinksIfCompleted(run);
       } catch (err) {
         dispatch({ type: "error", message: err instanceof ApiError ? err.message : "Resume failed." });
       } finally {
@@ -301,7 +329,10 @@ export function useRun(threadId: string) {
     if (file) {
       openStream();
       createRun(file, threadId)
-        .then((run) => dispatch({ type: "run", run }))
+        .then((run) => {
+          dispatch({ type: "run", run });
+          refreshDetailLinksIfCompleted(run);
+        })
         .catch((err) => {
           dispatch({ type: "error", message: err instanceof ApiError ? err.message : "Upload failed." });
           startPolling();

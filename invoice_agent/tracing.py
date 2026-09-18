@@ -163,6 +163,36 @@ def traced_generation(name: str, *, model: str, input_data: Any = None):
             pass
 
 
+def trace_url(thread_id: str) -> str | None:
+    """A link to this run's Langfuse trace, for the detail view's "view
+    trace" link (docs/FRONTEND_PLAN.md's Phase 9D) - or None if tracing
+    isn't configured, `LANGFUSE_PROJECT_ID` isn't set, or Langfuse itself
+    fails, since none of those should ever break the detail view around it.
+
+    Needs one more env var than tracing itself does: Langfuse's trace-detail
+    URL is scoped to a project id (Project Settings -> General -> Project ID
+    in the Langfuse dashboard), which nothing else in this module needs to
+    know - `LANGFUSE_PUBLIC_KEY`/`SECRET_KEY` authenticate the SDK, they
+    aren't the project id. See docs/observability.md.
+
+    Reuses `create_trace_id(seed=thread_id)`, the same deterministic
+    derivation `get_langchain_handler` uses to merge an interrupted run's
+    two `graph.invoke()` calls into one trace - so this always points at
+    that same merged trace, not just one half of it.
+    """
+    project_id = os.environ.get("LANGFUSE_PROJECT_ID")
+    if not tracing_enabled() or not project_id:
+        return None
+    try:
+        from langfuse import get_client
+
+        trace_id = get_client().create_trace_id(seed=thread_id)
+        host = os.environ.get("LANGFUSE_HOST", "https://cloud.langfuse.com").rstrip("/")
+        return f"{host}/project/{project_id}/traces/{trace_id}"
+    except Exception:
+        return None
+
+
 def flush() -> None:
     """Force-send any buffered traces before a short-lived script exits. A
     no-op if tracing isn't configured, or if the flush itself fails - by

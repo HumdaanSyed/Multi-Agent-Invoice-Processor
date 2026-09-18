@@ -12,6 +12,7 @@ from invoice_agent.tracing import (
     flush,
     get_langchain_handler,
     trace_callbacks,
+    trace_url,
     traced_generation,
     tracing_enabled,
     usage_details_from_anthropic,
@@ -144,3 +145,50 @@ def test_traced_generation_propagates_wrapped_exception():
 
 def test_generation_recorder_noop_when_generation_is_none():
     _GenerationRecorder().record(output={"a": 1}, usage=_FakeUsage(1, 1))  # must not raise
+
+
+# --- trace_url (Phase 9D's detail-view "View trace" link) -----------------
+
+
+def test_trace_url_none_when_tracing_disabled(monkeypatch):
+    monkeypatch.setenv("LANGFUSE_PROJECT_ID", "proj-1")
+    assert trace_url("t-abc") is None
+
+
+def test_trace_url_none_when_project_id_unset(monkeypatch):
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    monkeypatch.delenv("LANGFUSE_PROJECT_ID", raising=False)
+    assert trace_url("t-abc") is None
+
+
+def test_trace_url_builds_link_from_project_id_and_deterministic_trace_id(monkeypatch):
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    monkeypatch.setenv("LANGFUSE_PROJECT_ID", "proj-1")
+    monkeypatch.delenv("LANGFUSE_HOST", raising=False)
+
+    from langfuse import get_client
+
+    expected_trace_id = get_client().create_trace_id(seed="t-abc")
+
+    assert trace_url("t-abc") == f"https://cloud.langfuse.com/project/proj-1/traces/{expected_trace_id}"
+
+
+def test_trace_url_respects_langfuse_host(monkeypatch):
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    monkeypatch.setenv("LANGFUSE_PROJECT_ID", "proj-1")
+    monkeypatch.setenv("LANGFUSE_HOST", "https://us.cloud.langfuse.com/")
+
+    assert trace_url("t-abc").startswith("https://us.cloud.langfuse.com/project/proj-1/traces/")
+
+
+def test_trace_url_same_thread_id_is_deterministic(monkeypatch):
+    """Same reasoning as get_langchain_handler's trace_id derivation - the
+    link must point at the same trace no matter how many times it's built."""
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    monkeypatch.setenv("LANGFUSE_PROJECT_ID", "proj-1")
+
+    assert trace_url("t-xyz") == trace_url("t-xyz")

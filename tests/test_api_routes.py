@@ -72,6 +72,7 @@ def _make_client(monkeypatch, *, invoice: dict = FLAWED_INVOICE) -> TestClient:
     monkeypatch.setattr(db, "insert_invoice", lambda inv: {**inv, "id": 1})
     monkeypatch.setattr(db, "insert_export_row", lambda thread_id, inv: {**inv, "id": 1, "thread_id": thread_id})
     monkeypatch.setattr(db, "is_duplicate", lambda vendor, number: False)
+    monkeypatch.setattr(db, "get_pdf_signed_url", lambda path, expires_in=3600: f"https://fake.supabase.co/{path}?token=fake")
 
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     saver = SqliteSaver(conn)
@@ -129,6 +130,65 @@ def test_full_flow_needs_review_then_resume_completes(client):
     assert body["status"] == "completed"
     assert body["invoice"]["subtotal"] == 12.0
     assert body["invoice"]["vendor_name"] == "Acme Corp"  # untouched field survives the merge
+
+
+def test_completed_detail_fetch_includes_pdf_url_but_resume_response_does_not(client):
+    """pdf_url/trace_url (Phase 9D's detail-view links) are populated only
+    by GET /invoices/{thread_id} for a completed run, never by the resume
+    response itself that races it - see RunResponse's docstring."""
+    response = _upload(client)
+    thread_id = response.json()["thread_id"]
+
+    resume_response = client.post(
+        f"/invoices/{thread_id}/resume", json={"corrections": {"subtotal": 12.0, "total": 12.0}}
+    )
+    assert resume_response.json()["status"] == "completed"
+    assert resume_response.json()["pdf_url"] is None
+
+    detail = client.get(f"/invoices/{thread_id}").json()
+    assert detail["status"] == "completed"
+    assert detail["pdf_url"] == "https://fake.supabase.co/invoices/fakehash_x.pdf?token=fake"
+    # No LANGFUSE_PROJECT_ID (or credentials at all - _no_langfuse_credentials)
+    # in this test environment, so trace_url stays None rather than raising.
+    assert detail["trace_url"] is None
+
+
+def test_completed_detail_fetch_falls_back_to_invoices_table_for_pre_phase9d_checkpoint(monkeypatch):
+    """A checkpoint whose output() ran before pdf_storage_path existed in
+    GraphState (any run completed before this column was added) must still
+    get a pdf_url on GET /invoices/{thread_id}, via
+    db.get_invoice_pdf_storage_path falling back to the invoices table -
+    see get_invoice_run's docstring."""
+
+    def fake_router(state):
+        return {"doc_type": "invoice", "status": "classified"}
+
+    def fake_extractor(state):
+        return {"invoice": dict(GOOD_INVOICE), "status": "extracted"}
+
+    def fake_output_without_pdf_storage_path(state, config=None):
+        return {"status": "completed"}
+
+    monkeypatch.setattr(graph_module, "router", fake_router)
+    monkeypatch.setattr(graph_module, "extractor", fake_extractor)
+    monkeypatch.setattr(graph_module, "output", fake_output_without_pdf_storage_path)
+    monkeypatch.setattr(db, "insert_export_row", lambda thread_id, inv: {**inv, "id": 1, "thread_id": thread_id})
+    monkeypatch.setattr(db, "is_duplicate", lambda vendor, number: False)
+    monkeypatch.setattr(db, "get_invoice_pdf_storage_path", lambda vendor, number: "invoices/legacy_x.pdf")
+    monkeypatch.setattr(
+        db, "get_pdf_signed_url", lambda path, expires_in=86400: f"https://fake.supabase.co/{path}?token=fake"
+    )
+
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    saver = SqliteSaver(conn)
+    app = create_app(checkpointer=saver, load_env=False)
+    with TestClient(app) as client:
+        response = _upload(client)
+        thread_id = response.json()["thread_id"]
+        assert response.json()["status"] == "completed"
+
+        detail = client.get(f"/invoices/{thread_id}").json()
+        assert detail["pdf_url"] == "https://fake.supabase.co/invoices/legacy_x.pdf?token=fake"
 
 
 def test_resume_on_completed_thread_is_409_not_silent_success(client):

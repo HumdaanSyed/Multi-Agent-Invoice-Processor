@@ -66,6 +66,16 @@ hard requirement for the pipeline to work, matching this project's
 existing pattern for optional integrations (e.g. `db.is_duplicate`
 defaulting to skipped when no `duplicate_checker` is wired in).
 
+## "View trace" link in the frontend (Phase 9D)
+
+The Next.js detail view links straight to a completed run's Langfuse trace,
+via `invoice_agent/tracing.py`'s `trace_url(thread_id)`. This needs one more
+setting beyond the two keys above: `LANGFUSE_PROJECT_ID` (Project Settings →
+General → Project ID) — Langfuse's trace-detail URL is scoped to a project
+id, which nothing else here needs to know. Without it, `trace_url()` returns
+`None` and the detail view simply omits the link — the same "optional,
+degrades quietly" pattern as tracing itself, not a second thing to debug.
+
 ## Interrupt/resume shows as one trace, not two
 
 `interrupt()`/`Command(resume=...)` means a flagged invoice's "before" and

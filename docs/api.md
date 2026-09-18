@@ -35,6 +35,15 @@ notably right after a persistence failure, where it still reads whatever the
 last *successful* node set), so the API derives its own status from the
 checkpointer's snapshot rather than trusting that field directly.
 
+`pdf_url` (a time-limited Supabase Storage link) and `trace_url` (a Langfuse
+trace link, only if `LANGFUSE_PROJECT_ID` is configured — see
+`docs/observability.md`) are the one exception to "same no matter which
+endpoint produced it": both are generated fresh, best-effort, only by `GET
+/invoices/{thread_id}` for a `completed` run — never by `POST /invoices` or
+the resume endpoint, and never for any other status. They exist for the
+Next.js detail view (`docs/FRONTEND_PLAN.md`'s Phase 9D), not as a general
+part of the status envelope.
+
 ## Why blocking, not 202 + polling
 
 `POST /invoices` holds the connection open for the full extraction — 15–40s

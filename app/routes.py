@@ -57,7 +57,7 @@ from app.models import (
 )
 from app.service import DerivedStatus, GraphService, derive_status
 from app.uploads import save_upload, sweep_old_uploads
-from invoice_agent import db, events
+from invoice_agent import db, events, tracing
 
 router = APIRouter()
 logger = logging.getLogger("app.routes")
@@ -77,6 +77,14 @@ def _to_run_response(thread_id: str, derived: DerivedStatus) -> RunResponse:
         flags=derived.flags,
         current_node=derived.current_node,
         failed_at_node=derived.failed_at_node,
+        # Unlike pdf_url/trace_url (GET-only, see get_invoice_run - both
+        # need an external I/O call this shared builder deliberately never
+        # makes), ledger_status is plain state already sitting in
+        # GraphState with no extra work to attach - safe to include on
+        # every endpoint that reaches "completed", not just GET, so a run
+        # watched live to completion knows its own ledger outcome without
+        # waiting on the SSE "ledger" event or a follow-up fetch.
+        ledger_status=derived.ledger_status,
     )
 
 
@@ -350,12 +358,37 @@ def _get_derived_or_none(service: GraphService, thread_id: str) -> DerivedStatus
 
 @router.get("/invoices/{thread_id}", response_model=RunResponse)
 def get_invoice_run(thread_id: str, request: Request) -> RunResponse:
+    """The one place `pdf_url`/`trace_url` get populated (see RunResponse's
+    docstring) - both are best-effort convenience links for the frontend's
+    read-only detail view (docs/FRONTEND_PLAN.md's Phase 9D), so a request
+    for a run that hasn't reached `completed` yet simply gets neither, with
+    no extra I/O attempted. `get_pdf_signed_url` caches its own result, so
+    this isn't a fresh Supabase Storage call on every request.
+
+    `derived.pdf_storage_path` is only ever set for a checkpoint that ran
+    through the post-Phase-9D `output()` node (`invoice_agent/graph.py`) -
+    a run completed before that falls back to `db.get_invoice_pdf_storage_path`,
+    which reads the same column straight off the `invoices` table row
+    (written by every `output()` that ever existed, old or new), so a
+    historical invoice's "source PDF" link isn't permanently missing just
+    because its checkpoint predates this column.
+    """
     service = _service(request)
     snapshot = service.get_snapshot(thread_id)
     derived = derive_status(snapshot)
     if derived is None:
         raise ThreadNotFound(f"No run found for thread_id={thread_id!r}.", thread_id=thread_id)
-    return _to_run_response(thread_id, derived)
+    response = _to_run_response(thread_id, derived)
+    if derived.status == "completed":
+        pdf_storage_path = derived.pdf_storage_path
+        if not pdf_storage_path and derived.invoice:
+            pdf_storage_path = db.get_invoice_pdf_storage_path(
+                derived.invoice.get("vendor_name", ""), derived.invoice.get("invoice_number", "")
+            )
+        if pdf_storage_path:
+            response.pdf_url = db.get_pdf_signed_url(pdf_storage_path)
+        response.trace_url = tracing.trace_url(thread_id)
+    return response
 
 
 @router.post("/invoices/{thread_id}/resume", response_model=RunResponse)
