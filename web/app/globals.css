@@ -51,8 +51,16 @@
   --radius: 0.5rem;
 }
 
+/*
+ * Dark tokens, defined twice on purpose (CSS has no way to share one
+ * declaration block between a media query and a selector): once for "the OS
+ * prefers dark and the user hasn't forced light", once for an explicit
+ * data-theme="dark". components/theme-toggle.tsx sets data-theme on <html>
+ * (and app/layout.tsx restores it before first paint); with no data-theme
+ * set, the page just follows the OS as before.
+ */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #17140f;
     --surface: #211d17;
     --border: #3a342a;
@@ -66,6 +74,21 @@
     --flag: #fbbf24;
     --error: #f87171;
   }
+}
+
+:root[data-theme="dark"] {
+  --bg: #17140f;
+  --surface: #211d17;
+  --border: #3a342a;
+  --text: #f2ece2;
+  --text-muted: #a89f91;
+  --accent: #8fb0d1;
+  --accent-soft: #1e2b38;
+  --muted-surface: #2a251d;
+  --neutral-hover: #2e2820;
+  --ok: #4ade80;
+  --flag: #fbbf24;
+  --error: #f87171;
 }
 
 @theme inline {

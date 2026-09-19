@@ -4,8 +4,10 @@ import { connection } from "next/server";
 import Link from "next/link";
 import "./globals.css";
 import { ExportBar } from "@/components/export-bar";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { PRODUCT_NAME, PRODUCT_TAGLINE } from "@/lib/config";
 import { LedgerStatusProvider } from "@/lib/ledger-status-context";
+import { THEME_STORAGE_KEY } from "@/lib/theme";
 
 // Verity's three type roles (docs/FRONTEND_PLAN.md): a serif for headings
 // and the wordmark, a clean sans for UI/body, a mono for numbers, dates,
@@ -44,9 +46,18 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="en"
+      // The theme script below sets data-theme before hydration.
+      suppressHydrationWarning
       className={`${heading.variable} ${ui.variable} ${data.variable} h-full antialiased`}
     >
       <head>
+        <script
+          // Restore a saved theme choice before first paint (no flash of the
+          // other theme). Storage may be blocked, hence the try/catch.
+          dangerouslySetInnerHTML={{
+            __html: `try{var t=localStorage.getItem(${JSON.stringify(THEME_STORAGE_KEY)});if(t==="light"||t==="dark")document.documentElement.dataset.theme=t}catch(e){}`,
+          }}
+        />
         {apiPublicUrl && (
           <script
             // "<" escaped so a hostile env value can't close the tag.
@@ -59,10 +70,11 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
       <body className="min-h-full flex flex-col bg-bg text-text">
         <LedgerStatusProvider>
           <header className="border-b border-border">
-            <div className="mx-auto flex max-w-[1100px] items-center px-6 py-5">
+            <div className="mx-auto flex max-w-[1100px] items-center justify-between px-6 py-5">
               <Link href="/" className="font-serif text-2xl tracking-tight text-text">
                 {PRODUCT_NAME}
               </Link>
+              <ThemeToggle />
             </div>
           </header>
           <main className="mx-auto w-full max-w-[1100px] flex-1 px-6 py-12">{children}</main>
