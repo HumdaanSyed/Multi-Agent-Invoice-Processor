@@ -61,17 +61,24 @@ def test_export_ledger_row_to_csv_rows_adds_provenance_to_every_row():
         assert row["thread_id"] == "t-abc"
 
 
-def test_export_ledger_row_to_csv_rows_matches_invoice_csv_rows_shape():
-    """The ledger's CSV output can't silently diverge from the frontend's
-    per-invoice CSV download - both must build the same per-line-item
-    fields from invoice_csv_rows()."""
-    ledger_rows = export_ledger_row_to_csv_rows(LEDGER_ROW)
-    plain_rows = invoice_csv_rows(LEDGER_ROW)
+def test_invoice_csv_rows_emits_one_row_per_line_item():
+    rows = invoice_csv_rows(INVOICE)
 
-    assert len(ledger_rows) == len(plain_rows)
-    for ledger_row, plain_row in zip(ledger_rows, plain_rows):
-        for field in CSV_FIELDS:
-            assert ledger_row[field] == plain_row[field]
+    assert [r["line_item_description"] for r in rows] == ["Widget", "Gadget"]
+    assert all(r["invoice_number"] == "INV-1" for r in rows)
+    assert set(rows[0]) == set(CSV_FIELDS)
+
+
+@pytest.mark.parametrize("line_items", [[], None])
+def test_invoice_csv_rows_zero_line_items_still_emits_one_row(line_items):
+    """`line_items or [{}]` - an invoice with no line items must still
+    appear in the ledger export (as one row with blank line-item columns),
+    not silently vanish from GET /export.csv."""
+    rows = invoice_csv_rows({**INVOICE, "line_items": line_items})
+
+    assert len(rows) == 1
+    assert rows[0]["invoice_number"] == "INV-1"
+    assert rows[0]["line_item_description"] is None
 
 
 class _FakeResult:

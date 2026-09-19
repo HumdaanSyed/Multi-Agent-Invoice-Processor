@@ -2,7 +2,7 @@ import Link from "next/link";
 import { RunStatusDot } from "@/components/run-status";
 import { UploadZone } from "@/components/upload-zone";
 import { getHealth, listRuns } from "@/lib/api";
-import { API_BASE_URL, PRODUCT_TAGLINE } from "@/lib/config";
+import { PRODUCT_TAGLINE, SERVER_API_BASE_URL } from "@/lib/config";
 import type { RunSummary } from "@/lib/types";
 import { formatDateTime } from "@/lib/utils";
 
@@ -88,7 +88,7 @@ export default async function Home() {
       {!backendOk && (
         <div className="rounded-lg border border-border bg-surface p-6">
           <p className="text-sm text-text-muted">
-            Backend ({API_BASE_URL}): <span className="text-error">unreachable</span>
+            Backend ({SERVER_API_BASE_URL}): <span className="text-error">unreachable</span>
           </p>
         </div>
       )}

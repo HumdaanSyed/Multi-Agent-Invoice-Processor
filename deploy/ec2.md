@@ -64,6 +64,7 @@ its backend URLs at runtime instead of baking them in (`web/Dockerfile`).
    services:
      backend:
        image: ghcr.io/<owner>/invoice-agent:latest
+       mem_limit: 512m
        env_file: [.env]
        volumes:
          - checkpoint_data:/app/checkpoints
@@ -74,7 +75,11 @@ its backend URLs at runtime instead of baking them in (`web/Dockerfile`).
 
      frontend:
        image: ghcr.io/<owner>/verity-web:latest
+       mem_limit: 256m
        environment:
+         # V8 sizes its heap from the host's RAM by default, not from this
+         # container's limit - cap it so Node can't outgrow mem_limit.
+         NODE_OPTIONS: --max-old-space-size=192
          # nginx (step 9) serves the frontend AND the backend's API paths on
          # one origin, so the browser calls the same address it loaded the
          # page from - no CORS to configure. Use the Elastic IP (or your
@@ -117,9 +122,13 @@ its backend URLs at runtime instead of baking them in (`web/Dockerfile`).
        listen 80;
        client_max_body_size 25m;   # PDF uploads; the backend caps at 20MB
 
-       # The backend's routes (app/routes.py) - none collide with the
-       # frontend's pages (/, /runs/...) or its /_next assets.
-       location ~ ^/(invoices|export|health|docs|openapi\.json) {
+       # The backend's routes (app/routes.py plus FastAPI's built-in docs
+       # at /docs, /redoc, /openapi.json). This is a hand-kept copy of that
+       # route table: add a backend route and it must be added here too, or
+       # it 404s on EC2 only. The (/|$) keeps look-alike frontend paths
+       # such as /export-history on the frontend. None collide with the
+       # frontend's pages (/, /runs/...), /healthz, or its /_next assets.
+       location ~ ^/(invoices|export(\.csv|/status)|health|docs|redoc|openapi\.json)(/|$) {
            proxy_pass http://127.0.0.1:8000;
            proxy_http_version 1.1;
            proxy_set_header Host $host;
@@ -168,7 +177,9 @@ its backend URLs at runtime instead of baking them in (`web/Dockerfile`).
 11. **Verify** — visit `http://<elastic-ip>/` in a browser. The "Recent
     runs" list loads and the footer shows the ledger row count; upload a
     sample invoice from `data/eval/` and watch it extract and validate
-    live, then land on "needs review" or the completed detail view. This is
+    live, then land on "needs review" or the completed detail view (the
+    repo's `data/eval/` has 20 synthetic invoices to upload; they are not
+    shipped in the images, and Verity has no built-in sample picker). This is
     the roadmap's literal "Done when": reachable at a public URL,
     processes an invoice live.
 

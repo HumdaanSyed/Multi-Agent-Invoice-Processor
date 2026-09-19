@@ -4,6 +4,9 @@
 
 A recruiter or client hands this system an invoice (or it pulls one from an inbox automatically). A small pipeline of specialized agents classifies it, extracts every field with a structured-output LLM call, runs deterministic business-rule checks (not another LLM call — plain arithmetic and date math), flags anything wrong for a human to fix, and writes the clean result to Postgres. Every run is traced end-to-end, the extraction accuracy is measured against a labeled eval set rather than asserted, and the whole thing ships as Docker images (backend and frontend) with a live URL.
 
+<!-- The link below is the old Streamlit deployment. Update it (or remove it)
+     once the Railway services are migrated - see deploy/railway.md,
+     "Migrating an existing Streamlit deployment". -->
 **[Live demo →](https://frontend-production-d7a5.up.railway.app)**
 
 <p align="center">
@@ -156,7 +159,8 @@ uv run pytest
 ## Limitations & future work
 
 
-- **No authentication.** Both the API and the Verity UI are open to anyone with the URL. A real deployment needs auth, rate limiting, and per-user data isolation before it touches anyone else's documents.
+- **No authentication or rate limiting - and that has a cost.** Both the API and the Verity UI are open to anyone with the URL, and on a public deployment the browser calls the backend directly (CORS only restricts browsers, not scripts). Anyone can `POST /invoices` in a loop and spend your `ANTHROPIC_API_KEY` credits (only a 20MB upload cap and a 2-run concurrency limit throttle it), and can read every run and download the whole ledger via `GET /invoices` and `GET /export.csv`. If you deploy this, set a spend limit and turn off auto-reload in the Anthropic console and keep real invoices out of it - see [`deploy/railway.md`](deploy/railway.md#security-the-backend-is-public). A real deployment needs auth, rate limiting, and per-user data isolation before it touches anyone else's documents.
+- **No built-in sample picker.** The old Streamlit UI had a "try a sample" dropdown backed by the 20 PDFs in `data/eval/`; Verity is upload-only, and the images don't ship those files. Use a repo checkout's copy to try it.
 - **Single-model extraction.** Everything currently runs on `claude-sonnet-5`; routing simple invoices to a cheaper/faster model and hard scanned documents to a stronger one (mentioned as a design goal) isn't wired up yet — there's no signal in production to route on until this runs against a larger, messier real-world sample.
 - **Gmail ingestion is local-only.** MCP's `stdio` transport can't run inside the deployed backend — pulling from Gmail today means running `python -m invoice_agent.ingest_mcp --source gmail` from a machine you control (a cron job, not automatic). An HTTP-transport MCP server would close this gap.
 - **No retries/idempotency around the two live API calls** (router, extractor) beyond what the Anthropic SDK does internally — a transient failure mid-run surfaces as a failed run, not an automatic retry.
