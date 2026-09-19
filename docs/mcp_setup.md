@@ -99,8 +99,9 @@ until you do).
   stdio subprocess from a request handler on a remote host.
 - **No automatic resume loop.** Flagged invoices from ingestion sit parked
   until someone resumes them by hand. A real product would want a review
-  queue UI (Phase 9's Streamlit frontend is a natural place for this) or an
-  API endpoint (Phase 8) rather than manual `Command(resume=...)` calls.
+  queue UI (Phase 9's Verity frontend already has the review screen, and its
+  "Recent runs" list shows parked runs — a dedicated queue view is the
+  natural next step) or an API endpoint (Phase 8) rather than manual `Command(resume=...)` calls.
 - **Duplicate detection is still your safety net.** If an ingestion run
   reprocesses an email (e.g. after a crash before `mark_processed`), Phase
   4's duplicate check will catch a truly re-sent invoice and flag it rather

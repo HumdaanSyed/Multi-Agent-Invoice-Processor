@@ -1,0 +1,12 @@
+# Build context for web/Dockerfile. node_modules/.next are rebuilt inside the
+# image; .env* files may hold local overrides that must never reach a layer.
+node_modules
+.next
+.env
+.env.*
+!.env.example
+npm-debug.log*
+Dockerfile
+.dockerignore
+README.md
+tsconfig.tsbuildinfo

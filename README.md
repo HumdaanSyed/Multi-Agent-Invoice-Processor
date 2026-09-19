@@ -2,19 +2,15 @@
 
 **Turns a PDF invoice into a validated, database-ready record — with a human in the loop for anything that doesn't add up.**
 
-A recruiter or client hands this system an invoice (or it pulls one from an inbox automatically). A small pipeline of specialized agents classifies it, extracts every field with a structured-output LLM call, runs deterministic business-rule checks (not another LLM call — plain arithmetic and date math), flags anything wrong for a human to fix, and writes the clean result to Postgres. Every run is traced end-to-end, the extraction accuracy is measured against a labeled eval set rather than asserted, and the whole thing ships as one Docker image with a live URL.
+A recruiter or client hands this system an invoice (or it pulls one from an inbox automatically). A small pipeline of specialized agents classifies it, extracts every field with a structured-output LLM call, runs deterministic business-rule checks (not another LLM call — plain arithmetic and date math), flags anything wrong for a human to fix, and writes the clean result to Postgres. Every run is traced end-to-end, the extraction accuracy is measured against a labeled eval set rather than asserted, and the whole thing ships as Docker images (backend and frontend) with a live URL.
 
+<!-- The link below is the old Streamlit deployment. Update it (or remove it)
+     once the Railway services are migrated - see deploy/railway.md,
+     "Migrating an existing Streamlit deployment". -->
 **[Live demo →](https://frontend-production-d7a5.up.railway.app)**
 
 <p align="center">
-  <!-- Add a screenshot/GIF here: docs/images/frontend-upload.png -->
-  <!-- Verified live on 2026-08-20: sidebar shows "Backend ready", a
-       "...or try a sample" dropdown of the 20 eval invoices next to the
-       upload box, and processing eval_01 correctly landed on the
-       needs-review screen (a real "possible duplicate" flag, since that
-       sample had already been run once) with the flag text, an editable
-       field-by-field form, and a Resume action - the human-in-the-loop
-       path in the architecture diagram below, working end-to-end. -->
+  <!-- Add a screenshot/GIF here: docs/images/verity-live-run.png -->
   <em>Screenshot / demo GIF placeholder — see docs/demo_script.md for the shot list</em>
 </p>
 
@@ -27,7 +23,7 @@ Most "AI invoice extraction" demos stop at "the LLM read the PDF." That's the ea
 ```mermaid
 flowchart TD
     subgraph Ingestion
-        A1["Streamlit upload"]
+        A1["Verity web upload"]
         A2["MCP: filesystem watch"]
         A3["MCP: Gmail IMAP"]
     end
@@ -70,12 +66,13 @@ Every run is a LangGraph `thread_id` checkpointed to SQLite, so a flagged invoic
 
 - **PDF-native extraction** — Claude reads the PDF directly (as a `document` content block) with a Pydantic `output_format`; no separate OCR step for the common case, digital or scanned.
 - **Deterministic validation, not vibes** — line items must sum to the stated subtotal, subtotal + tax must equal total (±$0.01), dates must be valid ISO 8601 with `due_date >= invoice_date`, and vendor+invoice-number pairs are checked against Supabase for duplicates. None of this is delegated to the LLM.
-- **Human-in-the-loop review** — any flagged invoice interrupts the graph (`interrupt()`) with the extracted data and the exact flags that tripped; a human edits the offending fields in the Streamlit UI and resumes. The resume path re-runs the *same* validator, not a rubber stamp — a partial fix that leaves one flag standing re-interrupts instead of silently passing through.
+- **Human-in-the-loop review** — any flagged invoice interrupts the graph (`interrupt()`) with the extracted data and the exact flags that tripped; a human corrects the offending fields in Verity's review screen and resumes. The resume path re-runs the *same* validator, not a rubber stamp — a partial fix that leaves one flag standing re-interrupts instead of silently passing through.
 - **Automated ingestion** — an MCP server pulls new invoices from a filesystem inbox or a Gmail account (IMAP + App Password) and runs each one through the same pipeline unattended.
 - **Full observability** — every graph run is traced in Langfuse: the LangGraph node tree is auto-captured, and the two raw Claude calls (router, extractor) are recorded as generation spans with cost/latency, since they bypass `langchain_anthropic`'s own tracing hook.
 - **Quantified accuracy, not a claim** — a 20-document eval harness scores field-level exact-match, micro/macro-F1, and a document-level "every field and every line item correct" metric, sliced by currency and render type (digital vs. scanned). See [Eval results](#eval-results) below.
-- **REST API + web UI** — a FastAPI backend (upload, poll, resume, list, health/readiness) and a Streamlit frontend on top of it; either can be driven independently.
-- **Containerized, CI-built, deployable** — one Docker image runs both services; GitHub Actions tests and publishes it to GHCR on every push; deploy guides cover Railway (primary) and a 1GB-RAM EC2 box (documented for AWS range).
+- **Verity, a live web UI** — a Next.js frontend where fields appear one by one as the model extracts them (streamed over Server-Sent Events), the validation checks then resolve green or red in sequence, and a flagged invoice opens straight into an editable review screen. A read-only detail view links each completed invoice to its source PDF and its Langfuse trace, and a persistent export bar shows the shared ledger and downloads it as CSV.
+- **REST API** — a FastAPI backend (upload, live event stream, poll, resume, list, CSV export, health/readiness); the frontend is just one client of it.
+- **Containerized, CI-built, deployable** — a backend image and a Next.js frontend image (standalone build, backend URLs read at runtime so one image serves any deployment); GitHub Actions tests and publishes both to GHCR on every push; deploy guides cover Railway (primary) and a 1GB-RAM EC2 box (documented for AWS range).
 
 ## Tech stack
 
@@ -89,14 +86,14 @@ Every run is a LangGraph `thread_id` checkpointed to SQLite, so a flagged invoic
 | Ingestion | MCP (`langchain-mcp-adapters`) | Standardized tool-calling interface for "list/download/mark-processed" — swapping Gmail for another source is a new MCP server, not a rewrite. |
 | Checkpointing | `SqliteSaver` | State survives an HTTP backend restart — `InMemorySaver` doesn't, and this system explicitly needs runs to outlive a single request. |
 | Observability | Langfuse | Full trace per run, including the two raw Anthropic SDK calls that would otherwise be invisible to LangChain's own instrumentation. |
-| Backend / frontend | FastAPI + Streamlit | A typed REST API for real integration, plus a UI a non-technical reviewer can actually use, without building a separate SPA. |
-| Deploy | Docker → Railway (primary) / EC2 (documented) | One image, two start commands; Railway for the live link, EC2 documented to show the constrained-resource, "you build the box" side of deployment too. |
+| Backend / frontend | FastAPI + Next.js (Verity) | A typed REST API for real integration, plus a UI a non-technical reviewer can actually use — streaming extraction and validation live over SSE, which is what makes the pipeline's work visible instead of a spinner. |
+| Deploy | Docker → Railway (primary) / EC2 (documented) | Two images built once in CI and pulled, never built on the target; Railway for the live link, EC2 documented to show the constrained-resource, "you build the box" side of deployment too. |
 
 ## Production signals
 
 Things a from-scratch script usually doesn't have, that this does:
 
-- **226 automated tests**, all offline (mocked at the HTTP/API boundary — no live credentials needed to run `pytest`), covering the graph, validation, the API layer, the MCP ingestion sources, and the frontend's own data-transformation logic.
+- **250+ automated tests**, all offline (mocked at the HTTP/API boundary — no live credentials needed to run `pytest`), covering the graph, validation, the API layer and its event stream, the export ledger, and the MCP ingestion sources.
 - **A quantified eval harness** (`evals/`) with per-field precision/recall/F1, not just "it worked on the examples I tried."
 - **Human-in-the-loop that actually re-validates.** A common shortcut is "human edited it, so trust it" — this system re-runs the full validator (math, dates, duplicate check) on every resume, so a partial or wrong correction is caught, not silently persisted.
 - **Structured error handling on the API**, not bare 500s — a typed `ApiError` hierarchy distinguishes "the model is degraded," "the PDF is unprocessable," "persistence failed," etc., each mapped to the right HTTP status and a message safe to show a client, with the real exception still logged server-side.
@@ -136,18 +133,19 @@ Run the pipeline against one PDF:
 python scripts/run_graph.py data/eval/eval_01_acme_cloud_hosting_llc.pdf
 ```
 
-Or run the full stack (backend + frontend) locally:
+Or run the full stack (backend + frontend) locally — the frontend needs Node 20+:
 
 ```bash
 uvicorn app.main:app --reload &
-streamlit run frontend/app.py
+cd web && npm install && npm run dev
+# backend: http://localhost:8000 · frontend (Verity): http://localhost:3000
 ```
 
-Or run it containerized, no local Python setup at all:
+Or run it containerized, no local Python or Node setup at all:
 
 ```bash
 docker compose up
-# backend: http://localhost:8000 · frontend: http://localhost:8501
+# backend: http://localhost:8000 · frontend (Verity): http://localhost:3000
 ```
 
 Run the tests (no credentials needed — everything's mocked at the connection seam):
@@ -156,16 +154,19 @@ Run the tests (no credentials needed — everything's mocked at the connection s
 uv run pytest
 ```
 
-**Deeper docs:** [`docs/api.md`](docs/api.md) (REST API reference) · [`docs/frontend.md`](docs/frontend.md) (Streamlit architecture) · [`docs/mcp_setup.md`](docs/mcp_setup.md) (Gmail/filesystem ingestion) · [`docs/observability.md`](docs/observability.md) (Langfuse tracing) · [`deploy/railway.md`](deploy/railway.md) / [`deploy/ec2.md`](deploy/ec2.md) (deployment)
+**Deeper docs:** [`docs/api.md`](docs/api.md) (REST API reference) · [`web/README.md`](web/README.md) (Verity frontend) · [`docs/mcp_setup.md`](docs/mcp_setup.md) (Gmail/filesystem ingestion) · [`docs/observability.md`](docs/observability.md) (Langfuse tracing) · [`deploy/railway.md`](deploy/railway.md) / [`deploy/ec2.md`](deploy/ec2.md) (deployment)
 
 ## Limitations & future work
 
 
-- **No authentication.** Both the API and the Streamlit UI are open to anyone with the URL. A real deployment needs auth, rate limiting, and per-user data isolation before it touches anyone else's documents.
+- **No authentication or rate limiting - and that has a cost.** Both the API and the Verity UI are open to anyone with the URL, and on a public deployment the browser calls the backend directly (CORS only restricts browsers, not scripts). Anyone can `POST /invoices` in a loop and spend your `ANTHROPIC_API_KEY` credits (only a 20MB upload cap and a 2-run concurrency limit throttle it), and can read every run and download the whole ledger via `GET /invoices` and `GET /export.csv`. If you deploy this, set a spend limit and turn off auto-reload in the Anthropic console and keep real invoices out of it - see [`deploy/railway.md`](deploy/railway.md#security-the-backend-is-public). A real deployment needs auth, rate limiting, and per-user data isolation before it touches anyone else's documents.
+- **No built-in sample picker.** The old Streamlit UI had a "try a sample" dropdown backed by the 20 PDFs in `data/eval/`; Verity is upload-only, and the images don't ship those files. Use a repo checkout's copy to try it.
 - **Single-model extraction.** Everything currently runs on `claude-sonnet-5`; routing simple invoices to a cheaper/faster model and hard scanned documents to a stronger one (mentioned as a design goal) isn't wired up yet — there's no signal in production to route on until this runs against a larger, messier real-world sample.
 - **Gmail ingestion is local-only.** MCP's `stdio` transport can't run inside the deployed backend — pulling from Gmail today means running `python -m invoice_agent.ingest_mcp --source gmail` from a machine you control (a cron job, not automatic). An HTTP-transport MCP server would close this gap.
 - **No retries/idempotency around the two live API calls** (router, extractor) beyond what the Anthropic SDK does internally — a transient failure mid-run surfaces as a failed run, not an automatic retry.
 - **Eval set is synthetic, single-renderer.** See the caveat under [Eval results](#eval-results) — this measures whether the pipeline is internally consistent, not real-world extraction accuracy across arbitrary invoice layouts.
+- **The live event stream is single-worker only.** Field and check events flow from the graph to the browser through an in-memory event bus (`invoice_agent/events.py`) - fine for the one Uvicorn worker this project deploys (already forced by the 1GB RAM budget), but a second worker process would have its own independent bus, and a subscriber connected to one would never see events published in the other. Horizontal scaling means moving the bus to Redis pub/sub, not adding locks. The polling fallback in the frontend still reaches a correct final state, but the live view would not work.
+- **The export ledger is append-only by design.** Every successful write adds a row to `invoice_exports` and nothing ever updates or deletes one (a database trigger enforces it) - so a corrected re-run of the same invoice appears twice in `GET /export.csv`, once per write, as an audit trail rather than a deduplicated snapshot. The `invoices` table is the deduplicated system of record; the ledger is what actually happened, in order.
 - **No PII handling.** Real invoices contain names, addresses, sometimes bank details — nothing here redacts, encrypts at rest beyond Supabase's defaults, or enforces retention limits.
 
 ---

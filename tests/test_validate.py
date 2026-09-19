@@ -1,7 +1,11 @@
 """Tests for deterministic invoice validation (no API calls)."""
 
+from datetime import date
+
+import pytest
+
 from invoice_agent.schema import Invoice
-from invoice_agent.validate import CheckResult, run_checks, validate_invoice
+from invoice_agent.validate import CheckResult, parse_iso_date, run_checks, validate_invoice
 
 EXPECTED_CHECK_IDS = [
     "line_items_sum",
@@ -26,6 +30,15 @@ GOOD_INVOICE = {
     "due_date": "2026-07-31",
     "currency": "USD",
 }
+
+
+def test_parse_iso_date_valid():
+    assert parse_iso_date("2026-07-01") == date(2026, 7, 1)
+
+
+@pytest.mark.parametrize("value", [None, "", "15 June 2026", "2026-13-40", "not-a-date"])
+def test_parse_iso_date_empty_or_non_iso_returns_none_never_raises(value):
+    assert parse_iso_date(value) is None
 
 
 def test_clean_invoice_passes():

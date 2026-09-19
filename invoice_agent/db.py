@@ -203,12 +203,10 @@ def get_pdf_signed_url(storage_path: str, expires_in: int = 86400) -> Optional[s
 
 
 def invoice_csv_rows(invoice: dict) -> list[dict]:
-    """One CSV row dict per line item, keyed by `CSV_FIELDS` - the shared
-    row-assembly logic behind both `export_ledger_row_to_csv_rows` below
-    (the server-side export ledger's own CSV download) and the frontend's
-    per-invoice CSV download (`frontend/forms.py`'s `invoice_to_csv_bytes`),
-    so the outputs can't silently diverge in row shape. `line_items or
-    [{}]` so a zero-line-item invoice still emits one row."""
+    """One CSV row dict per line item, keyed by `CSV_FIELDS` - the row-
+    assembly logic behind `export_ledger_row_to_csv_rows` below (the export
+    ledger's CSV download). `line_items or [{}]` so a zero-line-item
+    invoice still emits one row."""
     header_values = {field: invoice.get(field) for field in _HEADER_FIELDS}
     line_items = invoice.get("line_items") or [{}]
     rows = []

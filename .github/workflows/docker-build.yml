@@ -2,9 +2,11 @@ name: Build and publish Docker image
 
 # Runs the offline test suite first (matches CLAUDE.md's "run the relevant
 # smoke test... before considering the task done" applied to CI itself),
-# then builds the single shared image (Dockerfile) and pushes it to GHCR -
-# this is what deploy/ec2.md's "pull a pre-built image, never build on the
-# box" step pulls from. No secrets to configure: GHCR authenticates with
+# then builds and pushes both images to GHCR - the backend
+# (Dockerfile -> invoice-agent) and the Next.js frontend (web/Dockerfile ->
+# verity-web). This is what deploy/ec2.md's "pull pre-built images, never
+# build on the box" step pulls from; the frontend image reads its backend
+# URLs at runtime, so one build serves every deployment. No secrets to configure: GHCR authenticates with
 # the repo's own built-in GITHUB_TOKEN.
 #
 # One job, not two: a separate "test" job gated on by a "build" job's
@@ -16,10 +18,15 @@ name: Build and publish Docker image
 on:
   push:
     branches: [main]
+  # Pull requests run the tests and *build* both images (nothing is pushed
+  # or logged in) so a broken Dockerfile or a failed font download shows up
+  # on the PR instead of after the merge.
+  pull_request:
   workflow_dispatch: {}
 
 env:
   IMAGE_NAME: invoice-agent
+  WEB_IMAGE_NAME: verity-web
 
 jobs:
   build-and-push:
@@ -41,7 +48,7 @@ jobs:
         run: uv sync --locked
 
       - name: Run test suite
-        # All 226 tests are offline (mocked at the connection seam) - no
+        # All tests are offline (mocked at the connection seam) - no
         # ANTHROPIC_API_KEY/SUPABASE_* needed, see tests/*.py's docstrings.
         run: uv run pytest tests/ -q
 
@@ -49,6 +56,7 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -56,9 +64,32 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Compute image path (GHCR requires lowercase)
-        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}" >> "$GITHUB_ENV"
+        run: |
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}" >> "$GITHUB_ENV"
+          echo "WEB_IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${WEB_IMAGE_NAME}" >> "$GITHUB_ENV"
 
-      - name: Build and push
+      # Build BOTH images before pushing either: if the frontend build
+      # fails, :latest for the backend must not have already moved (that left
+      # the two images out of sync on the next redeploy). The push steps
+      # below re-run the same builds, served from the layer cache.
+      - name: Build backend
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Build frontend
+        uses: docker/build-push-action@v7
+        with:
+          context: ./web
+          push: false
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+      - name: Push backend
+        if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -66,5 +97,15 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=backend
+
+      - name: Push frontend
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v7
+        with:
+          context: ./web
+          push: true
+          tags: |
+            ${{ env.WEB_IMAGE }}:latest
+            ${{ env.WEB_IMAGE }}:${{ github.sha }}
+          cache-from: type=gha,scope=frontend

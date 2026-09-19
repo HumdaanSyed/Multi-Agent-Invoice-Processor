@@ -57,11 +57,7 @@ CheckCallback = Callable[[CheckResult], None]
 
 def parse_iso_date(value: str | None) -> date | None:
     """Best-effort ISO 8601 (YYYY-MM-DD) parse - `None` for an empty/missing
-    value or a non-ISO string alike, never raises. Public (not prefixed
-    `_parse_date`) because `frontend/forms.py` reuses this exact parser
-    rather than hand-duplicating it - the frontend needs to know the same
-    thing this module does about whether a date is genuinely ISO before
-    deciding how to render/re-submit it."""
+    value or a non-ISO string alike, never raises."""
     if not value:
         return None
     try:

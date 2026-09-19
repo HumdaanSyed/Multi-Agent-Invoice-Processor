@@ -10,6 +10,10 @@ outright. FastAPI runs sync handlers in a threadpool, which keeps the event
 loop free for concurrent `/health` and `/docs` requests while a blocking
 `graph.invoke()` runs. `GET /health` is the one exception: zero I/O, no
 reason not to stay on the event loop.
+
+Route paths here are mirrored by hand in deploy/ec2.md's nginx `location`
+regex (browser and backend share one origin there) - add or rename a route
+and update that block too.
 """
 
 from __future__ import annotations

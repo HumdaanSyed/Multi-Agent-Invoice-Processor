@@ -79,3 +79,7 @@ docker-compose.yml
 # Claude Code / CI - irrelevant to the running app
 .claude/
 .github/
+
+# Next.js frontend - built by its own image (web/Dockerfile). Excluding it
+# keeps web/node_modules (hundreds of MB) out of the backend build context.
+web/
