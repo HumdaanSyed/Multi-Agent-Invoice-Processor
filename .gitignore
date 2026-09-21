@@ -53,6 +53,8 @@ uploads/
 # IS committed and referenced by CLAUDE.md/the README.
 docs/ROADMAP.md
 docs/demo_script.md
+# Long-form engineering write-up (the old detailed README), kept locally as a reference.
+docs/ENGINEERING.md
 
 # Eval harness - data/eval/*.pdf, evals/dataset.jsonl, and evals/report.md
 # are committed deliverables (synthetic fixtures, no privacy exposure; see
