@@ -129,6 +129,8 @@ export interface ExportStatusResponse {
 export interface StageEvent {
   type: "stage";
   thread_id: string;
+  /** Server publish time, epoch ms (invoice_agent/events.py). */
+  ts?: number;
   node: string;
   stage: string;
 }
@@ -143,6 +145,8 @@ export interface FieldEvent {
 export interface ValidationStartEvent {
   type: "validation_start";
   thread_id: string;
+  /** Server publish time, epoch ms (invoice_agent/events.py). */
+  ts?: number;
 }
 
 /** Stable check_id strings (docs/api.md) - safe to key UI state/ordering
@@ -168,6 +172,8 @@ export interface CheckEvent {
 export interface InterruptedEvent {
   type: "interrupted";
   thread_id: string;
+  /** Server publish time, epoch ms (invoice_agent/events.py). */
+  ts?: number;
   status: "needs_review";
   invoice: Invoice;
   flags: string[];
@@ -176,6 +182,8 @@ export interface InterruptedEvent {
 export interface RunEndEvent {
   type: "run_end";
   thread_id: string;
+  /** Server publish time, epoch ms (invoice_agent/events.py). */
+  ts?: number;
   status: RunStatus;
 }
 
@@ -207,6 +215,8 @@ export interface StreamErrorEvent {
 export interface LedgerEvent {
   type: "ledger";
   thread_id: string;
+  /** Server publish time, epoch ms (invoice_agent/events.py). */
+  ts?: number;
   status: "written" | "failed";
 }
 

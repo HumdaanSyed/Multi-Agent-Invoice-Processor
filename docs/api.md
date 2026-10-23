@@ -124,7 +124,9 @@ returns) then `done`. If the channel is still open (the run interrupted,
 or hasn't started), you get every event published so far, replayed as
 history, followed by whatever comes next live.
 
-**Event types:**
+**Event types:** every event's `data` also carries `ts`, the server time it
+was published (Unix epoch milliseconds), so a client can show how long each
+step took even when the events are replayed later.
 
 | Event | Payload | Meaning |
 |---|---|---|

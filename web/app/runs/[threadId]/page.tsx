@@ -1,11 +1,15 @@
 "use client";
 
+import { ArrowLeft, ExternalLink, FileText, FileX2, ReceiptText } from "lucide-react";
+import Link from "next/link";
 import { use, useEffect } from "react";
 import { ExtractionPanel } from "@/components/extraction-panel";
 import { InvoiceDetail } from "@/components/invoice-detail";
 import { PdfPreview } from "@/components/pdf-preview";
+import { derivePipeline, PipelineSteps } from "@/components/pipeline-steps";
+import { Card, EmptyState, ErrorBox, secondaryButton, SkeletonBars } from "@/components/primitives";
 import { ReviewForm } from "@/components/review-form";
-import { StageIndicator } from "@/components/stage-indicator";
+import { RunStatusChip } from "@/components/run-status";
 import { ValidationPanel } from "@/components/validation-panel";
 import { useRun } from "@/hooks/use-run";
 import { useLedgerStatusContext } from "@/lib/ledger-status-context";
@@ -14,7 +18,7 @@ import { getRunFile } from "@/lib/run-file-cache";
 export default function RunPage({ params }: PageProps<"/runs/[threadId]">) {
   const { threadId } = use(params);
   const file = getRunFile(threadId);
-  const { run, stage, fields, receivedFields, checks, checksSettling, ledgerStatus, resuming, resume, error } =
+  const { run, timeline, fields, receivedFields, checks, checksSettling, ledgerStatus, resuming, resume, error } =
     useRun(threadId);
   const { setRunLedgerStatus } = useLedgerStatusContext();
 
@@ -67,61 +71,122 @@ export default function RunPage({ params }: PageProps<"/runs/[threadId]">) {
   const showLiveView = status !== "skipped" && status !== "failed" && !showReviewForm && !showDetail;
   const failedChecks = checks.filter((check) => !check.skipped && !check.passed);
 
+  const completedChecks: typeof checks =
+    status === "completed" && !checks.length
+      ? (run?.validation?.checks ?? []).map((c) => ({ type: "check", thread_id: threadId, ...c }))
+      : checks;
+  const pipeline = derivePipeline({ timeline, run, checks: completedChecks, receivedFields: receivedFields.size, ledgerStatus });
+  const extracting = pipeline.state.extract.status === "running";
+  const invoice = run?.invoice;
+  // The upload's own response only lands once the run pauses or finishes;
+  // until then, arriving stream events are the proof it's processing.
+  const shownStatus = status ?? (timeline.length > 0 || receivedFields.size > 0 ? "processing" : undefined);
+  const title = invoice
+    ? invoice.vendor_name
+    : status === "skipped"
+      ? "Not an invoice"
+      : status === "failed"
+        ? "Run failed"
+        : shownStatus
+          ? "Processing invoice"
+          : "Loading run…";
+
   return (
-    <div className="flex flex-col gap-6">
-      <StageIndicator stage={stage} />
+    <div className="space-y-6">
+      <Link href="/" className="inline-flex items-center gap-1.5 text-sm text-slate-500 transition hover:text-slate-900 dark:hover:text-white">
+        <ArrowLeft className="size-4" aria-hidden /> All runs
+      </Link>
 
-      {/* Framed as "your changes weren't saved" rather than a bare error
-          dump - the message itself can still be a raw backend validation
-          string (e.g. a Pydantic error) until that's addressed server-side,
-          but ReviewForm now stays mounted through this (see showReviewForm
-          above), so the corrections that triggered it aren't lost either
-          way. */}
-      {error && <p className="text-sm text-error">Couldn&apos;t save your changes: {error}</p>}
-
-      {status === "skipped" && (
-        <div className="rounded-lg border border-border bg-surface p-6">
-          <p className="text-text">
-            Classified as {run?.doc_type ?? "not an invoice"} - nothing further to process.
-          </p>
+      <div className="grid gap-6 lg:grid-cols-[400px_1fr]">
+        <div className="min-w-0 space-y-6">
+          <PdfPreview file={file} pdfUrl={run?.pdf_url} reading={extracting} />
+          <Card>
+            <PipelineSteps state={pipeline.state} finished={pipeline.finished} />
+          </Card>
         </div>
-      )}
 
-      {status === "failed" && (
-        <div className="rounded-lg border border-error/30 bg-surface p-6">
-          <p className="text-error">
-            Processing failed{run?.failed_at_node ? ` at "${run.failed_at_node}"` : ""}.
-          </p>
+        <div className="min-w-0 space-y-6">
+          <Card className="flex flex-wrap items-center justify-between gap-4" data-testid="run-summary">
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="grid size-11 shrink-0 place-items-center rounded-xl bg-teal-100 text-teal-600 dark:bg-teal-950 dark:text-teal-400">
+                <ReceiptText className="size-5" aria-hidden />
+              </div>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h1 className="truncate text-lg font-semibold">{title}</h1>
+                  <RunStatusChip status={shownStatus} />
+                </div>
+                <div className="truncate text-xs text-slate-500">
+                  {invoice && (
+                    <>
+                      Invoice <span className="font-mono">{invoice.invoice_number}</span> ·{" "}
+                    </>
+                  )}
+                  Thread <span className="font-mono">{threadId}</span>
+                </div>
+              </div>
+            </div>
+            {(run?.pdf_url || run?.trace_url) && (
+              <div className="flex flex-wrap gap-2">
+                {run?.pdf_url && (
+                  <a href={run.pdf_url} target="_blank" rel="noopener noreferrer" className={secondaryButton}>
+                    <FileText className="size-4" aria-hidden /> Source PDF
+                  </a>
+                )}
+                {run?.trace_url && (
+                  <a href={run.trace_url} target="_blank" rel="noopener noreferrer" className={secondaryButton}>
+                    <ExternalLink className="size-4" aria-hidden /> View trace
+                  </a>
+                )}
+              </div>
+            )}
+          </Card>
+
+          {/* Framed as "your changes weren't saved": ReviewForm stays mounted
+              through this (see showReviewForm above), so nothing typed is lost. */}
+          {error && (
+            <ErrorBox>
+              <strong className="font-semibold">Couldn&apos;t save your changes: </strong>
+              {error}
+            </ErrorBox>
+          )}
+
+          {status === "failed" && (
+            <ErrorBox>
+              <strong className="font-semibold">Processing failed</strong>
+              {run?.failed_at_node ? ` at the "${run.failed_at_node}" step.` : "."} The full error is in the server log.
+            </ErrorBox>
+          )}
+
+          {status === "skipped" && (
+            <Card className="grid min-h-96 place-items-center">
+              <EmptyState icon={FileX2} title="Nothing to process">
+                Claude classified this document as {run?.doc_type ?? "not an invoice"}, so it stopped after the first step.
+              </EmptyState>
+            </Card>
+          )}
+
+          {showLiveView &&
+            (run || receivedFields.size > 0 || timeline.length > 0 ? (
+              <>
+                <ExtractionPanel fields={fields} receivedFields={receivedFields} invoice={run?.invoice} reading={extracting} />
+                <ValidationPanel checks={checks} settling={checksSettling} />
+              </>
+            ) : (
+              <Card className="grid min-h-96 place-items-center">
+                <SkeletonBars label="Connecting to the run…" />
+              </Card>
+            ))}
+
+          {showReviewForm && run?.invoice && (
+            <ReviewForm invoice={run.invoice} failedChecks={failedChecks} flags={run.flags ?? []} onSubmit={resume} submitting={resuming} />
+          )}
+
+          {showDetail && run?.invoice && (
+            <InvoiceDetail threadId={threadId} invoice={run.invoice} validation={run.validation} workMs={pipeline.workMs} />
+          )}
         </div>
-      )}
-
-      {showLiveView && (
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-          <PdfPreview file={file} />
-          <div className="flex flex-col gap-6">
-            <ExtractionPanel fields={fields} receivedFields={receivedFields} invoice={run?.invoice} />
-            <ValidationPanel checks={checks} settling={checksSettling} />
-          </div>
-        </div>
-      )}
-
-      {showReviewForm && run?.invoice && (
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-          <PdfPreview file={file} />
-          <ReviewForm invoice={run.invoice} failedChecks={failedChecks} onSubmit={resume} submitting={resuming} />
-        </div>
-      )}
-
-      {showDetail && run?.invoice && (
-        <InvoiceDetail
-          threadId={threadId}
-          invoice={run.invoice}
-          validation={run.validation}
-          file={file}
-          pdfUrl={run.pdf_url}
-          traceUrl={run.trace_url}
-        />
-      )}
+      </div>
     </div>
   );
 }

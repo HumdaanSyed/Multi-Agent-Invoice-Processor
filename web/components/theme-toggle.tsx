@@ -30,7 +30,7 @@ export function ThemeToggle() {
     setTheme(currentTheme());
   }, []);
 
-  if (theme === null) return <span className="size-8" aria-hidden />;
+  if (theme === null) return <span className="size-9" aria-hidden />;
 
   const next: Theme = theme === "dark" ? "light" : "dark";
 
@@ -50,7 +50,8 @@ export function ThemeToggle() {
       onClick={toggle}
       aria-label={`Switch to ${next} theme`}
       title={`Switch to ${next} theme`}
-      className="inline-flex size-8 items-center justify-center rounded-lg border border-border text-text-muted transition-colors hover:bg-brand-soft hover:text-text"
+      data-testid="theme-toggle"
+      className="inline-flex size-9 items-center justify-center rounded-xl border border-slate-200 text-slate-500 transition hover:bg-slate-50 hover:text-slate-900 dark:border-slate-700 dark:hover:bg-slate-800 dark:hover:text-white"
     >
       {theme === "dark" ? <Sun className="size-4" aria-hidden /> : <Moon className="size-4" aria-hidden />}
     </button>

@@ -20,8 +20,17 @@ const STREAM_END_EVENTS = new Set<RunEvent["type"]>(["run_end", "done", "interru
 const POLL_INTERVAL_MS = 2500;
 const CHECK_REVEAL_INTERVAL_MS = 200;
 
+/** One timestamped milestone from the stream: a stage starting, or the run
+ * pausing/ending/writing its ledger row. components/pipeline-steps.tsx turns
+ * these into real per-step durations. */
+export interface TimelineMark {
+  kind: string;
+  ts: number;
+}
+
 interface State {
   run: RunResponse | null;
+  timeline: TimelineMark[];
   stage: { node: string; stage: string } | null;
   fields: Partial<Invoice>;
   receivedFields: Set<string>;
@@ -34,6 +43,7 @@ interface State {
 
 type Action =
   | { type: "stage"; node: string; stage: string }
+  | { type: "mark"; mark: TimelineMark }
   | { type: "field"; name: string; value: unknown }
   | { type: "validation_start" }
   | { type: "check_queued" }
@@ -46,6 +56,7 @@ type Action =
 
 const initialState: State = {
   run: null,
+  timeline: [],
   stage: null,
   fields: {},
   receivedFields: new Set(),
@@ -60,6 +71,13 @@ function reducer(state: State, action: Action): State {
   switch (action.type) {
     case "stage":
       return { ...state, stage: { node: action.node, stage: action.stage } };
+    case "mark": {
+      // A reconnect (or React Strict Mode's double mount) can replay the same
+      // event twice; the server timestamp makes the duplicate recognisable.
+      const { kind, ts } = action.mark;
+      if (state.timeline.some((m) => m.kind === kind && m.ts === ts)) return state;
+      return { ...state, timeline: [...state.timeline, action.mark].sort((a, b) => a.ts - b.ts) };
+    }
     case "field": {
       const receivedFields = new Set(state.receivedFields);
       receivedFields.add(action.name);
@@ -205,6 +223,12 @@ export function useRun(threadId: string) {
     };
 
     const onEvent = (event: RunEvent) => {
+      if ("ts" in event && typeof event.ts === "number") {
+        const kind = event.type === "stage" ? event.stage : event.type;
+        if (event.type === "stage" || event.type === "interrupted" || event.type === "run_end" || event.type === "ledger") {
+          dispatch({ type: "mark", mark: { kind, ts: event.ts } });
+        }
+      }
       switch (event.type) {
         case "stage":
           dispatch({ type: "stage", node: event.node, stage: event.stage });
@@ -388,6 +412,7 @@ export function useRun(threadId: string) {
 
   return {
     run: state.run,
+    timeline: state.timeline,
     stage: state.stage,
     fields: state.fields,
     receivedFields: state.receivedFields,

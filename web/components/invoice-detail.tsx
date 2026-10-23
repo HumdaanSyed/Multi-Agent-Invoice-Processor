@@ -1,71 +1,86 @@
-import { ExtractionPanel } from "@/components/extraction-panel";
-import { PdfPreview } from "@/components/pdf-preview";
+"use client";
+
+import { Calculator, Clock, ListOrdered, Wallet } from "lucide-react";
+import { useState } from "react";
+import { ExtractionPanel, LineItemsTable } from "@/components/extraction-panel";
+import { formatMs } from "@/components/pipeline-steps";
+import { Card, StatTiles } from "@/components/primitives";
 import { ValidationPanel } from "@/components/validation-panel";
 import type { CheckEvent, Invoice, ValidationResult } from "@/lib/types";
 
 const EMPTY_FIELDS = {};
 const EMPTY_RECEIVED_FIELDS = new Set<string>();
 
+type Tab = "fields" | "items" | "checks";
+
 /**
- * The read-only "Detail" screen (docs/FRONTEND_PLAN.md's Phase 9D, screen
- * 4): a completed invoice, its line items, and links out to its source PDF
- * and its trace. Reuses ExtractionPanel's `invoice` mode for the fields
- * grid - the same fully-settled rendering the live view already falls back
- * to once an authoritative Invoice exists (extraction-panel.tsx), so this
- * view can't drift from that one's field list or formatting.
+ * The read-only Detail screen for a completed invoice. Checks come from
+ * RunResponse.validation.checks (present for every completed run, from any
+ * endpoint), not the live view's SSE-only checks, so a cold revisit shows
+ * them too.
  */
 export function InvoiceDetail({
   threadId,
   invoice,
   validation,
-  file,
-  pdfUrl,
-  traceUrl,
+  workMs,
 }: {
   threadId: string;
   invoice: Invoice;
   validation?: ValidationResult | null;
-  file: File | undefined;
-  pdfUrl?: string | null;
-  traceUrl?: string | null;
+  workMs: number | null;
 }) {
-  // RunResponse.validation.checks (always present for a completed run,
-  // from any endpoint) rather than the live view's SSE-streamed checks -
-  // those only ever exist for a run this tab watched live, so relying on
-  // them here would leave a cold revisit (or a run that just finished)
-  // with no check results at all, same shape as CheckEvent minus the
-  // discriminator/thread_id ValidationPanel doesn't actually read.
-  const checks: CheckEvent[] = (validation?.checks ?? []).map((check) => ({
-    type: "check",
-    thread_id: threadId,
-    ...check,
-  }));
+  const [tab, setTab] = useState<Tab>("fields");
+  const checks: CheckEvent[] = (validation?.checks ?? []).map((check) => ({ type: "check", thread_id: threadId, ...check }));
+  const applicable = checks.filter((c) => !c.skipped);
+  const passed = applicable.filter((c) => c.passed).length;
+
+  const tabs: [Tab, string][] = [
+    ["fields", "Fields"],
+    ["items", `Line items (${invoice.line_items.length})`],
+    ["checks", `Checks (${passed}/${applicable.length})`],
+  ];
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <PdfPreview file={file} pdfUrl={pdfUrl} />
-        <div className="flex flex-col gap-6">
-          <ExtractionPanel fields={EMPTY_FIELDS} receivedFields={EMPTY_RECEIVED_FIELDS} invoice={invoice} />
-          <ValidationPanel checks={checks} settling={false} />
-        </div>
-      </div>
+    <div className="space-y-6">
+      <StatTiles
+        items={[
+          { icon: Wallet, label: "Total", value: `${invoice.total.toFixed(2)} ${invoice.currency}` },
+          { icon: ListOrdered, label: "Line items", value: invoice.line_items.length },
+          { icon: Calculator, label: "Checks passed", value: applicable.length ? `${passed}/${applicable.length}` : "—" },
+          // Machine time only (review wait excluded), and only when this tab
+          // saw the run's stream - never estimated.
+          { icon: Clock, label: "Processing time", value: workMs != null ? formatMs(workMs) : "—" },
+        ]}
+      />
 
-      <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-border pt-4 text-sm text-text-muted">
-        <span>
-          Thread <span className="font-mono text-text">{threadId}</span>
-        </span>
-        {pdfUrl && (
-          <a href={pdfUrl} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline">
-            Open source PDF ↗
-          </a>
-        )}
-        {traceUrl && (
-          <a href={traceUrl} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline">
-            View trace ↗
-          </a>
-        )}
-      </div>
+      <Card className="min-w-0">
+        <div role="tablist" className="mb-4 flex gap-1 overflow-x-auto [scrollbar-width:none] rounded-xl bg-slate-100 p-1 dark:bg-slate-800">
+          {tabs.map(([id, label]) => (
+            <button
+              key={id}
+              role="tab"
+              aria-selected={tab === id}
+              onClick={() => setTab(id)}
+              data-testid={`tab-${id}`}
+              className={`whitespace-nowrap rounded-lg px-3 py-1.5 text-sm font-medium transition ${
+                tab === id ? "bg-white shadow-sm dark:bg-slate-950" : "text-slate-500 hover:text-slate-900 dark:hover:text-white"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {tab === "fields" && <ExtractionPanel bare showLineItems={false} fields={EMPTY_FIELDS} receivedFields={EMPTY_RECEIVED_FIELDS} invoice={invoice} />}
+        {tab === "items" && <LineItemsTable items={invoice.line_items} />}
+        {tab === "checks" &&
+          (checks.length ? (
+            <ValidationPanel bare checks={checks} settling={false} />
+          ) : (
+            <p className="py-6 text-center text-sm text-slate-500">No check results were recorded for this run.</p>
+          ))}
+      </Card>
     </div>
   );
 }

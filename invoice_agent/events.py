@@ -76,11 +76,14 @@ class Event:
     thread_id: str
     seq: int
     payload: dict
+    # When the event was published, so a client can show real step durations
+    # even for history replayed long after the fact (a reload mid-review).
+    ts: float = field(default_factory=time.time)
 
     def to_sse(self) -> str:
         import json
 
-        data = json.dumps({"thread_id": self.thread_id, **self.payload})
+        data = json.dumps({"thread_id": self.thread_id, "ts": round(self.ts * 1000), **self.payload})
         return f"id: {self.seq}\nevent: {self.type}\ndata: {data}\n\n"
 
 

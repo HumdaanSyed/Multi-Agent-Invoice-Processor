@@ -24,6 +24,17 @@ Open [http://localhost:3000](http://localhost:3000). With no configuration
 it talks to `http://127.0.0.1:8000`; point it elsewhere by copying
 `.env.example` to `.env.local` (see below).
 
+## Design
+
+Slate neutrals with one teal-to-cyan accent, Geist Sans and Geist Mono,
+Tailwind utility classes only (no component library). Status colours carry
+meaning: emerald passed, amber needs attention, rose failed, slate skipped.
+Dark mode follows the OS, and the header toggle can pin either theme.
+Shared pieces (cards, buttons, chips, stat tiles) live in
+`components/primitives.tsx`. The run page's pipeline stepper shows real
+per-step durations, taken from the server timestamp (`ts`) on every stream
+event.
+
 ## Configuration
 
 Backend URLs are read at **request time**, not build time, so one prebuilt

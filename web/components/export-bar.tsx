@@ -1,8 +1,8 @@
 "use client";
 
-import { Download } from "lucide-react";
+import { Database, Download } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { buttonVariants } from "@/components/ui/button";
+import { Chip, secondaryButton } from "@/components/primitives";
 import { useLedgerStatusContext } from "@/lib/ledger-status-context";
 import { exportCsvUrl, getExportStatus } from "@/lib/api";
 import type { ExportStatusResponse } from "@/lib/types";
@@ -69,31 +69,42 @@ export function ExportBar() {
   }, [runLedgerStatus]);
 
   return (
-    <footer className="border-t border-border bg-surface">
-      <div className="mx-auto flex max-w-[1100px] flex-wrap items-center justify-between gap-3 px-6 py-4">
-        <p className="text-sm text-text-muted">
+    <footer className="border-t border-slate-200 bg-white/80 backdrop-blur dark:border-slate-800 dark:bg-slate-900/80">
+      <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-500" data-testid="ledger-summary">
+          <Database className="size-4 shrink-0 text-teal-500" aria-hidden />
           {loadFailed ? (
-            "Export ledger status is unavailable right now."
+            <span>Export ledger status is unavailable right now.</span>
           ) : status === null ? (
-            "Loading export ledger…"
+            <span>Loading export ledger…</span>
           ) : status.row_count === 0 ? (
-            "One shared ledger of every processed invoice - nothing written yet."
+            <span>One shared ledger of every processed invoice - nothing written yet.</span>
           ) : (
-            <>
+            <span>
               One shared ledger of every processed invoice:{" "}
-              <span className="font-mono text-text">{status.row_count}</span>
+              <span className="font-semibold tabular-nums text-slate-900 dark:text-slate-100">{status.row_count.toLocaleString()}</span>
               {status.row_count === 1 ? " row" : " rows"}
-              {status.last_written_at && <>, last written {formatDateTime(status.last_written_at)}</>}.
-            </>
+              {status.last_written_at && <>, last written {formatDateTime(status.last_written_at)}</>}
+            </span>
           )}
-          {runLedgerStatus === "pending" && <span className="ml-2 text-text-muted">· This run: writing…</span>}
-          {runLedgerStatus === "written" && <span className="ml-2 font-medium text-ok">· Added to ledger</span>}
+          {runLedgerStatus === "pending" && (
+            <Chip tone="active" data-testid="ledger-status">
+              This run: writing…
+            </Chip>
+          )}
+          {runLedgerStatus === "written" && (
+            <Chip tone="success" data-testid="ledger-status">
+              Added to ledger
+            </Chip>
+          )}
           {runLedgerStatus === "failed" && (
-            <span className="ml-2 text-error">· This run&apos;s ledger write failed</span>
+            <Chip tone="error" data-testid="ledger-status">
+              This run&apos;s ledger write failed
+            </Chip>
           )}
-        </p>
-        <a href={exportCsvUrl()} className={buttonVariants({ variant: "outline", size: "sm" })}>
-          <Download aria-hidden />
+        </div>
+        <a href={exportCsvUrl()} className={secondaryButton} data-testid="export-csv">
+          <Download className="size-4" aria-hidden />
           Export CSV
         </a>
       </div>

@@ -20,6 +20,14 @@ def _reset_registry():
     events.reset()
 
 
+def test_to_sse_carries_server_timestamp_in_ms():
+    event = events.Event(type="stage", thread_id="t1", seq=3, payload={"stage": "extracting"}, ts=1700000000.1234)
+    sse = event.to_sse()
+    assert sse.startswith("id: 3\nevent: stage\n")
+    assert '"ts": 1700000000123' in sse
+    assert '"stage": "extracting"' in sse
+
+
 def test_open_channel_is_idempotent():
     assert events.open_channel("t1") is True
     assert events.open_channel("t1") is True

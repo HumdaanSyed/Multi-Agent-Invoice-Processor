@@ -1,14 +1,12 @@
-import { Check, Minus, X } from "lucide-react";
+import { CheckCircle2, CircleDashed, MinusCircle, XCircle } from "lucide-react";
+import { Chip, ScoreBar } from "@/components/primitives";
 import type { CheckEvent, CheckId } from "@/lib/types";
 
 /**
  * The fixed set of checks every run publishes, in emission order - mirrors
- * invoice_agent/validate.py's `rows` table. check_id is documented
- * (docs/api.md) as a stable string "safe to key UI state/ordering off" -
- * this is exactly that: it lets a check's row (with its real label) exist
- * and show a neutral pending state before the check has actually resolved,
- * per docs/FRONTEND_PLAN.md's Phase 9B instruction 4. If validate.py adds,
- * removes, or renames a check, this list needs the matching update.
+ * invoice_agent/validate.py. check_id is a stable contract (docs/api.md), so a
+ * row can show a pending state before its result arrives. If validate.py adds,
+ * removes or renames a check, this list needs the matching update.
  */
 const EXPECTED_CHECKS: { check_id: CheckId; label: string }[] = [
   { check_id: "line_items_sum", label: "Line items sum to subtotal" },
@@ -19,51 +17,89 @@ const EXPECTED_CHECKS: { check_id: CheckId; label: string }[] = [
   { check_id: "not_duplicate", label: "Not a duplicate of an existing invoice" },
 ];
 
-function CheckRow({ label, check }: { label: string; check: CheckEvent | null }) {
-  const state = check === null ? "pending" : check.skipped ? "skipped" : check.passed ? "passed" : "failed";
+type RowState = "pending" | "passed" | "failed" | "skipped";
 
-  const icon =
-    state === "passed" ? (
-      <Check className="size-4 text-ok" aria-hidden />
-    ) : state === "failed" ? (
-      <X className="size-4 text-error" aria-hidden />
-    ) : (
-      <Minus className="size-4 text-text-muted" aria-hidden />
-    );
-
-  return (
-    <div className="flex flex-col gap-0.5 py-2">
-      <div className={`flex items-center gap-2 ${state === "pending" ? "" : "animate-in fade-in duration-300"}`}>
-        {icon}
-        <span className={state === "passed" ? "text-sm text-text" : "text-sm text-text-muted"}>{label}</span>
-      </div>
-      {state === "failed" && check?.detail && <p className="pl-6 text-sm text-error">{check.detail}</p>}
-      {state === "skipped" && <p className="pl-6 text-sm text-text-muted">Not applicable</p>}
-    </div>
-  );
-}
+const STYLE: Record<RowState, { icon: typeof CheckCircle2; color: string }> = {
+  passed: { icon: CheckCircle2, color: "text-emerald-500" },
+  failed: { icon: XCircle, color: "text-rose-500" },
+  skipped: { icon: MinusCircle, color: "text-slate-400" },
+  pending: { icon: CircleDashed, color: "text-slate-300 dark:text-slate-600" },
+};
 
 /**
- * Renders one row per EXPECTED_CHECKS entry, in fixed order, from the
- * start of validation - a check without a matching revealed CheckEvent yet
- * shows the neutral pending state (a label with a dash, no color), then
- * resolves to green/red/grey once useRun()'s staggered reveal (~200ms
- * apart) delivers its real result. `checks` only ever contains already-
- * revealed results (see hooks/use-run.ts) so lookups here are by check_id,
- * not by array position.
+ * One row per expected check, in fixed order. `checks` holds only results
+ * already revealed (hooks/use-run.ts staggers them ~200ms apart client-side),
+ * so lookups are by check_id, not position.
  */
-export function ValidationPanel({ checks, settling }: { checks: CheckEvent[]; settling: boolean }) {
+export function ValidationPanel({ checks, settling, bare = false }: { checks: CheckEvent[]; settling: boolean; bare?: boolean }) {
   if (checks.length === 0 && !settling) return null;
 
-  return (
-    <div className="rounded-lg border border-border bg-surface p-6">
-      <p className="mb-2 text-sm text-text-muted">Validation</p>
-      <div className="divide-y divide-border">
-        {EXPECTED_CHECKS.map(({ check_id, label }) => {
-          const resolved = checks.find((check) => check.check_id === check_id) ?? null;
-          return <CheckRow key={check_id} label={resolved?.label ?? label} check={resolved} />;
-        })}
+  const passed = checks.filter((c) => c.passed && !c.skipped).length;
+  const failed = checks.filter((c) => !c.passed && !c.skipped).length;
+  const skipped = checks.filter((c) => c.skipped).length;
+  const applicable = passed + failed;
+
+  const list = (
+    <ul className="grid gap-x-6 sm:grid-cols-2" data-testid="checks">
+      {EXPECTED_CHECKS.map(({ check_id, label }) => {
+        const check = checks.find((c) => c.check_id === check_id) ?? null;
+        const state: RowState = !check ? "pending" : check.skipped ? "skipped" : check.passed ? "passed" : "failed";
+        const { icon: Icon, color } = STYLE[state];
+        return (
+          <li
+            key={`${check_id}-${state}`}
+            className={`flex items-start gap-3 border-b border-slate-100 py-2.5 dark:border-slate-800 ${state === "pending" ? "" : "animate-[fade-in_0.3s_ease-out_both]"}`}
+            data-testid={`check-${check_id}`}
+            data-status={state}
+          >
+            <Icon className={`mt-0.5 size-5 shrink-0 ${color}`} aria-label={state} />
+            <div className="min-w-0">
+              <div className={`text-sm font-medium ${state === "pending" || state === "skipped" ? "text-slate-400" : ""}`}>
+                {check?.label ?? label}
+              </div>
+              <div className={`break-words text-xs ${state === "failed" ? "text-rose-600 dark:text-rose-400" : "text-slate-500"}`}>
+                {state === "failed"
+                  ? (check?.detail ?? "Failed")
+                  : state === "skipped"
+                    ? "Not applicable"
+                    : state === "passed"
+                      ? "Passed"
+                      : "Waiting…"}
+              </div>
+            </div>
+          </li>
+        );
+      })}
+    </ul>
+  );
+
+  const header = (
+    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+      <div className="flex items-center gap-3">
+        <h2 className="font-semibold">Validation checks</h2>
+        {applicable > 0 && <ScoreBar value={passed / applicable} label={`${passed} of ${applicable} checks passed`} />}
+      </div>
+      <div className="flex gap-2">
+        <Chip tone="success">{passed} passed</Chip>
+        <Chip tone="error">{failed} failed</Chip>
+        {skipped > 0 && <Chip tone="inactive">{skipped} skipped</Chip>}
       </div>
     </div>
+  );
+
+  if (bare) {
+    return (
+      <div>
+        {header}
+        {list}
+      </div>
+    );
+  }
+
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      {header}
+      {list}
+    </section>
   );
 }
