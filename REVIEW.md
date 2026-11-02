@@ -607,6 +607,12 @@ the general lesson, which applies to any UI layer or multi-service image.)
   serve a stale module where a newly exported const is `undefined` -
   restart the dev server before concluding a fix didn't work.
 
+- **Proxy buffer defaults vs. auth cookies.** (AWS deploy) Supabase's
+  session is several chunked `Set-Cookie` headers; behind nginx with default
+  `proxy_buffer_size` the OAuth callback 502s ("upstream sent too big
+  header") although every local test (no nginx) passed. Anything that adds
+  a reverse proxy must be tested through a real sign-in, not just curl.
+
 - **Authorization checked after the resource is read, or by a path the
   check doesn't cover.** (Auth phase) Every per-run route must call
   `_authorize_thread` *before* touching the snapshot, and list endpoints

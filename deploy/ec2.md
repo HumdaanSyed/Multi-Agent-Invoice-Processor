@@ -149,7 +149,7 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 sudo git clone --depth 1 https://github.com/HumdaanSyed/Multi-Agent-Invoice-Processor.git /opt/verity-src
 sudo install -d -m 755 /opt/verity /etc/verity
 sudo install -m 644 /opt/verity-src/deploy/aws/docker-compose.yml /opt/verity/
-sudo install -m 750 /opt/verity-src/deploy/aws/fetch-secrets.sh /opt/verity-src/deploy/aws/backup.sh /opt/verity/
+sudo install -m 750 /opt/verity-src/deploy/aws/fetch-secrets.sh /opt/verity-src/deploy/aws/backup.sh /opt/verity-src/deploy/aws/deploy.sh /opt/verity/
 sudo install -m 644 /opt/verity-src/deploy/aws/verity.service /etc/systemd/system/
 sudo install -m 600 /opt/verity-src/deploy/aws/config.env.example /etc/verity/config.env
 sudo nano /etc/verity/config.env    # fill in every value; IMAGE_TAG = the commit SHA
@@ -235,17 +235,33 @@ sudo docker compose -f /opt/verity/docker-compose.yml --env-file /etc/verity/con
 sudo tail -f /var/log/nginx/access.log /var/log/nginx/error.log
 ```
 
-**Deploy a new version.** Set `IMAGE_TAG` in `/etc/verity/config.env` to
-the new commit SHA, then:
+**Deploy a new version.** Normally automatic: see
+[Automatic deploys](#automatic-deploys-github-actions--oidc) below. By hand,
+with the full SHA of a commit CI has built:
 
 ```bash
-sudo docker compose -f /opt/verity/docker-compose.yml --env-file /etc/verity/config.env pull
-sudo systemctl restart verity
+sudo /opt/verity/deploy.sh <40-char-sha>
 ```
 
-**Roll back.** Set `IMAGE_TAG` back to the previous SHA and run the same
-two commands. The checkpoint schema is LangGraph's own, so rolling back
-across a LangGraph major version may need a restore as well.
+`deploy.sh` pulls first (a failed pull changes nothing), swaps `IMAGE_TAG`,
+restarts, and waits up to 180 s for both healthchecks. If they don't pass,
+it puts the previous tag back automatically and exits non-zero.
+
+**Roll back.** Run `deploy.sh` with the previous SHA (`git log` or the
+GitHub Actions history has them). The checkpoint schema is LangGraph's own,
+so rolling back across a LangGraph major version may need a restore as well.
+
+**Deploy-file changes.** `deploy.sh` only swaps images. When a commit also
+changes `deploy/aws/` (compose file, scripts), refresh the server's copy:
+
+```bash
+sudo git -C /opt/verity-src fetch -q && sudo git -C /opt/verity-src checkout -q <sha>
+sudo install -m 644 /opt/verity-src/deploy/aws/docker-compose.yml /opt/verity/
+sudo install -m 750 /opt/verity-src/deploy/aws/{fetch-secrets,backup,deploy}.sh /opt/verity/
+```
+
+The nginx config is installed with your domain substituted (§10), so
+re-apply it the same way only when it changes.
 
 **Rotate a secret.** Update the value in Secrets Manager, then run
 `sudo systemctl restart verity`. The unit re-fetches on every start.
@@ -269,6 +285,88 @@ stay correct.
 **Instance lost.** Repeat steps 6–12 with the same role and security group,
 move the Elastic IP across, then restore the checkpoint DB as above.
 Everything else lives in Supabase.
+
+## Automatic deploys (GitHub Actions + OIDC)
+
+After the images are pushed, the `deploy` job in
+`.github/workflows/docker-build.yml` waits for your approval in the
+`production` environment, then deploys that commit. No AWS keys are stored
+in GitHub:
+
+1. The job requests an **OIDC token** from GitHub, signed and saying
+   "repo HumdaanSyed/Multi-Agent-Invoice-Processor, environment
+   production".
+2. AWS STS checks the signature and those claims against the role's trust
+   policy ([`aws/github-deploy-trust-policy.json`](aws/github-deploy-trust-policy.json))
+   and returns credentials valid for about an hour.
+3. The role ([`aws/github-deploy-policy.json`](aws/github-deploy-policy.json))
+   can only send the **`verity-deploy` SSM document**
+   ([`aws/ssm-deploy-document.json`](aws/ssm-deploy-document.json)) to
+   **this one instance**. That document runs `/opt/verity/deploy.sh` and
+   nothing else, and its only input must match `^[0-9a-f]{40}$`.
+
+So a compromised workflow, or a malicious Action, could at most deploy a
+commit CI already built. It can't get a shell on the box, read secrets, or
+touch other AWS resources.
+
+### One-time setup
+
+On your laptop, as your admin user, from the repo root. Replace
+`INSTANCE_ID` with yours:
+
+```bash
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text); REGION=eu-north-1; INSTANCE_ID=i-xxxxxxxxxxxxxxxxx
+```
+
+Trust GitHub's token issuer (once per AWS account):
+
+```bash
+aws iam create-open-id-connect-provider --url https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com
+```
+
+Create the deploy role and its permissions:
+
+```bash
+sed "s/ACCOUNT_ID/$ACCOUNT_ID/g" deploy/aws/github-deploy-trust-policy.json | aws iam create-role --role-name verity-github-deploy --description "GitHub Actions (production env) deploys Verity via SSM" --assume-role-policy-document file:///dev/stdin --query Role.Arn --output text
+```
+
+```bash
+sed -e "s/ACCOUNT_ID/$ACCOUNT_ID/g; s/REGION/$REGION/g; s/INSTANCE_ID/$INSTANCE_ID/g" deploy/aws/github-deploy-policy.json | aws iam put-role-policy --role-name verity-github-deploy --policy-name verity-deploy --policy-document file:///dev/stdin
+```
+
+Register the SSM document:
+
+```bash
+aws ssm create-document --name verity-deploy --document-type Command --document-format JSON --content file://deploy/aws/ssm-deploy-document.json --query DocumentDescription.Status --output text
+```
+
+On the server, install `deploy.sh`. It's a new file, from the commit that
+added it:
+
+```bash
+sudo git -C /opt/verity-src fetch -q && sudo git -C /opt/verity-src checkout -q <sha> && sudo install -m 750 /opt/verity-src/deploy/aws/deploy.sh /opt/verity/
+```
+
+In GitHub, open the repo → **Settings → Environments → New environment**,
+named `production`:
+
+- **Required reviewers:** add yourself. This is the approval gate.
+- **Deployment branches and tags:** choose **Selected branches and tags**,
+  then add `main`. The role trusts the environment, not a branch, so this
+  is what keeps other branches out.
+- **Environment variables:**
+  - `AWS_DEPLOY_ROLE_ARN`: the ARN printed by `create-role`.
+  - `AWS_REGION`: `eu-north-1`.
+  - `VERITY_INSTANCE_ID`: your instance ID.
+
+  None of these are secrets.
+
+### Using it
+
+Merge to `main`. The run builds and pushes, then the `deploy` job shows
+**Waiting for review**. Click **Review deployments**, then **Approve and
+deploy**, and the job log shows `deploy.sh`'s output. A failed health check
+rolls the server back and marks the run as failed.
 
 ## What this doesn't do
 

@@ -252,10 +252,13 @@ pair. It covers:
 > Secrets live in Secrets Manager. The instance role reads them at boot into
 > a root-only file, so there are no AWS keys anywhere. Docker keeps the
 > container env in root-only config on the encrypted disk, so root on the
-> box is the trust boundary. Images are
-> built in CI and pinned by commit SHA, which makes rollback a one-line
-> change. The checkpoint DB is backed up nightly to S3 with a 30-day
-> lifecycle."
+> box is the trust boundary. Images are built in CI and pinned by commit
+> SHA. Deploys are keyless: GitHub's OIDC token assumes a role that trusts
+> only this repo's approval-gated `production` environment, and that role
+> can only send one SSM document to one instance. The document runs a
+> deploy script with a validated SHA, which health-checks the new version
+> and rolls back automatically. The checkpoint DB is backed up nightly to
+> S3 with a 30-day lifecycle."
 
 Trade-offs worth naming:
 - **Two JWT verifications per request** (cheap: the JWKS is cached) in
