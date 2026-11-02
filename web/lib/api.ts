@@ -10,8 +10,11 @@ import type {
   ErrorResponse,
   ExportStatusResponse,
   HealthResponse,
+  InboxItem,
+  InboxSource,
   Invoice,
   InvoiceCorrections,
+  McpCall,
   ReadinessResponse,
   RunEvent,
   RunEventType,
@@ -109,6 +112,28 @@ export function resumeRun(threadId: string, corrections?: InvoiceCorrections): P
 
 export function listRuns(limit = 20): Promise<RunListResponse> {
   return request(`/invoices?limit=${limit}`);
+}
+
+export function listInbox(source: InboxSource, limit = 10): Promise<McpCall & { items: InboxItem[] }> {
+  return request(`/inbox?source=${source}&limit=${limit}`);
+}
+
+function inboxPost<T>(path: string, source: InboxSource, id: string): Promise<McpCall & T> {
+  return request(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ source, id }),
+  });
+}
+
+export const downloadInboxItem = (source: InboxSource, id: string) =>
+  inboxPost<{ files: string[] }>("/inbox/download", source, id);
+
+export const markInboxItem = (source: InboxSource, id: string) => inboxPost<{ marked: boolean }>("/inbox/mark", source, id);
+
+/** A PDF the download tool saved on the server, fetched to start a normal run. */
+export function inboxFileUrl(name: string): string {
+  return `${API_BASE_URL}/inbox/files/${encodeURIComponent(name)}`;
 }
 
 export function getExportStatus(): Promise<ExportStatusResponse> {

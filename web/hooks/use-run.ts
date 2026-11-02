@@ -352,7 +352,7 @@ export function useRun(threadId: string) {
     const file = claimRunFile(threadId);
     if (file) {
       openStream();
-      createRun(file, threadId)
+      createRun(file, threadId) // POST /invoices, the actual upload, after the channel is open
         .then((run) => {
           dispatch({ type: "run", run });
           refreshDetailLinksIfCompleted(run);

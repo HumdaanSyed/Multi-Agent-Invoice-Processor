@@ -165,9 +165,11 @@ def create_app(*, checkpointer: Optional[BaseCheckpointSaver] = None, load_env: 
         allow_headers=["*"],
     )
 
+    from app.inbox import router as inbox_router
     from app.routes import router
 
     app.include_router(router)
+    app.include_router(inbox_router)
 
     return app
 

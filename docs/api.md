@@ -17,6 +17,10 @@ same run — a flagged invoice doesn't need to be re-uploaded to correct it.
 | `GET` | `/invoices/{thread_id}/stream` | Server-Sent Events feed of a run's progress. See "Streaming" below. |
 | `POST` | `/invoices/{thread_id}/resume` | Submits corrections (or an empty body) and continues the run. |
 | `GET` | `/invoices` | The 20 most recent runs, newest first. |
+| `GET` | `/inbox?source=gmail\|filesystem` | MCP `list_pending_invoices`. See "Inbox (MCP)" below. |
+| `POST` | `/inbox/download` | MCP `download_invoice_pdfs` for `{source, id}`; saves into the upload dir. |
+| `POST` | `/inbox/mark` | MCP `mark_processed` for `{source, id}`. |
+| `GET` | `/inbox/files/{name}` | A PDF the download tool saved, for the frontend to run like an upload. |
 | `GET` | `/health` | Static liveness — zero I/O. |
 | `GET` | `/health/ready` | Per-service config check (Anthropic, Supabase, Langfuse, checkpointer). |
 
@@ -158,6 +162,19 @@ its own independent registry; a `field`/`check` event published in one
 process would never reach a subscriber connected to another. Scaling to
 multiple workers means moving this to Redis pub/sub, not adding locking —
 locking only helps threads that already share memory.
+
+## Inbox (MCP)
+
+`app/inbox.py` makes the backend an MCP client. Each call spawns the chosen
+MCP server (`invoice_agent/mcp_servers/gmail_imap.py` or
+`filesystem_invoices.py`) as a stdio subprocess in the same container and
+invokes one tool; every response includes the tool name and how long it took
+(`ms`). The Gmail credentials are passed to the subprocess explicitly - the MCP
+SDK only forwards a minimal environment, and there's no `.env` file inside the
+container. Any MCP failure (missing credentials, IMAP login, search) comes back
+as a 503 `upstream_unavailable` with the server's message. The frontend's Inbox
+page (`web/app/inbox/page.tsx`) exposes all three tools and processes a
+downloaded PDF through the normal reserve + upload flow.
 
 ## Setup
 

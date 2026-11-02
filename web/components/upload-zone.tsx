@@ -32,7 +32,7 @@ export function UploadZone() {
       // Reserve a thread_id and open its event channel *before* the upload
       // (docs/api.md's "Streaming"); /runs/[threadId] does the actual upload
       // once it's mounted and subscribed.
-      const ticket = await reserveRun();
+      const ticket = await reserveRun(); // calls POST /invoices/reserve
       setRunFile(ticket.thread_id, file);
       router.push(`/runs/${ticket.thread_id}`);
     } catch (err) {

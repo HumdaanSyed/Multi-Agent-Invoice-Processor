@@ -1,4 +1,5 @@
 import { CheckCircle2, Clock, Database, TriangleAlert } from "lucide-react";
+import Link from "next/link";
 import { RecentRuns } from "@/components/recent-runs";
 import { STEPS } from "@/components/pipeline-steps";
 import { Chip, ErrorBox } from "@/components/primitives";
@@ -64,6 +65,12 @@ export default async function Home() {
         <div className="mt-6">
           <UploadZone />
         </div>
+        <p className="mt-3 text-sm text-slate-500">
+          Or pull invoices straight from email:{" "}
+          <Link href="/inbox" className="font-medium text-teal-700 hover:underline dark:text-teal-400" data-testid="inbox-link">
+            check the inbox via MCP →
+          </Link>
+        </p>
         {!backendOk && (
           <div className="mt-4">
             <ErrorBox>

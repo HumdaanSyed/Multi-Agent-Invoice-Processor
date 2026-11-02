@@ -90,6 +90,19 @@ flagged, it prints the `thread_id` and flags; resume it the same way
 `thread_id` (the checkpointer is `SqliteSaver`, so the parked state survives
 until you do).
 
+## From the web UI (Inbox page)
+
+With `docker compose up`, open http://localhost:3000/inbox. Pick **Gmail** or
+**Local folder**, press **Check inbox** (`list_pending_invoices`), then per
+email: **Download** (`download_invoice_pdfs`), **Process** (runs the PDF
+through the live pipeline, like an upload) and **Mark processed**
+(`mark_processed`). The backend is the MCP client here (`app/inbox.py`): stdio
+works because the MCP server runs as a subprocess inside the same backend
+container. Gmail needs `GMAIL_ADDRESS`/`GMAIL_APP_PASSWORD` in `.env`; the
+local-folder source reads `data/inbox/`, which docker-compose.yml mounts into
+the container. Unlike the CLI, nothing is marked processed automatically -
+each tool is a separate button so a demo can show them one at a time.
+
 ## Known limitations
 
 - **stdio transport is local-machine only.** This is fine for a cron job or

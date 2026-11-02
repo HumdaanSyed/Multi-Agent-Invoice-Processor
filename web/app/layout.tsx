@@ -72,6 +72,9 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
                   <Link href="/#runs" className="transition hover:text-teal-600 dark:hover:text-teal-400">
                     Runs
                   </Link>
+                  <Link href="/inbox" className="transition hover:text-teal-600 dark:hover:text-teal-400">
+                    Inbox
+                  </Link>
                 </nav>
                 <span className="hidden font-mono text-xs uppercase tracking-wider text-slate-400 lg:inline">claude · langgraph</span>
                 <ThemeToggle />

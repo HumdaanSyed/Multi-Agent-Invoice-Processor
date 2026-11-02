@@ -24,6 +24,9 @@ services:
     volumes:
       - checkpoint_data:/app/checkpoints
       - upload_data:/app/uploads
+      # The "Local folder" MCP source (filesystem_invoices.py) reads PDFs
+      # dropped here on your machine - the Inbox page's no-Gmail fallback.
+      - ./data/inbox:/app/data/inbox
     restart: unless-stopped
     # No explicit healthcheck: block - relies on the Dockerfile's own
     # HEALTHCHECK instruction, which frontend's depends_on below reads.

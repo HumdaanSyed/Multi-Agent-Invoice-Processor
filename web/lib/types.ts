@@ -234,3 +234,19 @@ export type RunEvent =
   | LedgerEvent;
 
 export type RunEventType = RunEvent["type"];
+
+// --- Inbox (app/inbox.py): the backend calling an MCP server's tools ------
+
+export type InboxSource = "gmail" | "filesystem";
+
+export interface InboxItem {
+  id: string;
+  source_description: string;
+  attachment_filenames: string[];
+}
+
+/** Every inbox response names the MCP tool it called and how long it took. */
+export interface McpCall {
+  tool: "list_pending_invoices" | "download_invoice_pdfs" | "mark_processed";
+  ms: number;
+}
