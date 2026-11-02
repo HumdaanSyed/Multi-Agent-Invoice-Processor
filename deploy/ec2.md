@@ -149,7 +149,8 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 sudo git clone --depth 1 https://github.com/HumdaanSyed/Multi-Agent-Invoice-Processor.git /opt/verity-src
 sudo install -d -m 755 /opt/verity /etc/verity
 sudo install -m 644 /opt/verity-src/deploy/aws/docker-compose.yml /opt/verity/
-sudo install -m 750 /opt/verity-src/deploy/aws/fetch-secrets.sh /opt/verity-src/deploy/aws/backup.sh /opt/verity-src/deploy/aws/deploy.sh /opt/verity/
+sudo install -m 750 /opt/verity-src/deploy/aws/fetch-secrets.sh /opt/verity-src/deploy/aws/backup.sh /opt/verity-src/deploy/aws/deploy.sh /opt/verity-src/deploy/aws/deploy-poll.sh /opt/verity/
+sudo install -m 644 /opt/verity-src/deploy/aws/verity-deploy.service /opt/verity-src/deploy/aws/verity-deploy.timer /etc/systemd/system/
 sudo install -m 644 /opt/verity-src/deploy/aws/verity.service /etc/systemd/system/
 sudo install -m 600 /opt/verity-src/deploy/aws/config.env.example /etc/verity/config.env
 sudo nano /etc/verity/config.env    # fill in every value; IMAGE_TAG = the commit SHA
@@ -184,7 +185,7 @@ sudo certbot renew --dry-run
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now verity
+sudo systemctl enable --now verity verity-deploy.timer
 sudo docker compose -f /opt/verity/docker-compose.yml --env-file /etc/verity/config.env ps
 ```
 
@@ -236,7 +237,7 @@ sudo tail -f /var/log/nginx/access.log /var/log/nginx/error.log
 ```
 
 **Deploy a new version.** Normally automatic: see
-[Automatic deploys](#automatic-deploys-github-actions--oidc) below. By hand,
+[Automatic deploys](#automatic-deploys-pull-based) below. By hand,
 with the full SHA of a commit CI has built:
 
 ```bash
@@ -257,7 +258,7 @@ changes `deploy/aws/` (compose file, scripts), refresh the server's copy:
 ```bash
 sudo git -C /opt/verity-src fetch -q && sudo git -C /opt/verity-src checkout -q <sha>
 sudo install -m 644 /opt/verity-src/deploy/aws/docker-compose.yml /opt/verity/
-sudo install -m 750 /opt/verity-src/deploy/aws/{fetch-secrets,backup,deploy}.sh /opt/verity/
+sudo install -m 750 /opt/verity-src/deploy/aws/{fetch-secrets,backup,deploy,deploy-poll}.sh /opt/verity/
 ```
 
 The nginx config is installed with your domain substituted (§10), so
@@ -286,87 +287,63 @@ stay correct.
 move the Elastic IP across, then restore the checkpoint DB as above.
 Everything else lives in Supabase.
 
-## Automatic deploys (GitHub Actions + OIDC)
+## Automatic deploys (pull-based)
 
-After the images are pushed, the `deploy` job in
+After the images are pushed, the `release` job in
 `.github/workflows/docker-build.yml` waits for your approval in the
-`production` environment, then deploys that commit. No AWS keys are stored
-in GitHub:
+`production` GitHub environment. Then it moves the **`production` git tag**
+to that commit, and that's all it does.
 
-1. The job requests an **OIDC token** from GitHub, signed and saying
-   "repo HumdaanSyed/Multi-Agent-Invoice-Processor, environment
-   production".
-2. AWS STS checks the signature and those claims against the role's trust
-   policy ([`aws/github-deploy-trust-policy.json`](aws/github-deploy-trust-policy.json))
-   and returns credentials valid for about an hour.
-3. The role ([`aws/github-deploy-policy.json`](aws/github-deploy-policy.json))
-   can only send the **`verity-deploy` SSM document**
-   ([`aws/ssm-deploy-document.json`](aws/ssm-deploy-document.json)) to
-   **this one instance**. That document runs `/opt/verity/deploy.sh` and
-   nothing else, and its only input must match `^[0-9a-f]{40}$`.
+On the server, `verity-deploy.timer` runs
+[`aws/deploy-poll.sh`](aws/deploy-poll.sh) every 2 minutes. It reads the
+tag with `git ls-remote` (the repo is public, so no credentials are
+involved) and, if the tag differs from the live `IMAGE_TAG`, runs
+`deploy.sh`, which health-checks the new version and rolls back on failure.
+A release that fails is remembered and not retried. Moving the tag to
+another commit clears that.
 
-So a compromised workflow, or a malicious Action, could at most deploy a
-commit CI already built. It can't get a shell on the box, read secrets, or
-touch other AWS resources.
+**Why pull, not push:** GitHub holds **no access to AWS at all**. There are
+no keys, no OIDC role and no SSM permissions, and nothing in AWS trusts
+GitHub. The most a compromised workflow could do is move a tag to a commit
+whose images CI already built, and the server still health-checks that
+before keeping it. (A push-based OIDC deploy needs
+`iam:CreateOpenIDConnectProvider`, which AWS Free-plan accounts block.)
 
 ### One-time setup
-
-On your laptop, as your admin user, from the repo root. Replace
-`INSTANCE_ID` with yours:
-
-```bash
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text); REGION=eu-north-1; INSTANCE_ID=i-xxxxxxxxxxxxxxxxx
-```
-
-Trust GitHub's token issuer (once per AWS account):
-
-```bash
-aws iam create-open-id-connect-provider --url https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com
-```
-
-Create the deploy role and its permissions:
-
-```bash
-sed "s/ACCOUNT_ID/$ACCOUNT_ID/g" deploy/aws/github-deploy-trust-policy.json | aws iam create-role --role-name verity-github-deploy --description "GitHub Actions (production env) deploys Verity via SSM" --assume-role-policy-document file:///dev/stdin --query Role.Arn --output text
-```
-
-```bash
-sed -e "s/ACCOUNT_ID/$ACCOUNT_ID/g; s/REGION/$REGION/g; s/INSTANCE_ID/$INSTANCE_ID/g" deploy/aws/github-deploy-policy.json | aws iam put-role-policy --role-name verity-github-deploy --policy-name verity-deploy --policy-document file:///dev/stdin
-```
-
-Register the SSM document:
-
-```bash
-aws ssm create-document --name verity-deploy --document-type Command --document-format JSON --content file://deploy/aws/ssm-deploy-document.json --query DocumentDescription.Status --output text
-```
-
-On the server, install `deploy.sh`. It's a new file, from the commit that
-added it:
-
-```bash
-sudo git -C /opt/verity-src fetch -q && sudo git -C /opt/verity-src checkout -q <sha> && sudo install -m 750 /opt/verity-src/deploy/aws/deploy.sh /opt/verity/
-```
 
 In GitHub, open the repo → **Settings → Environments → New environment**,
 named `production`:
 
 - **Required reviewers:** add yourself. This is the approval gate.
 - **Deployment branches and tags:** choose **Selected branches and tags**,
-  then add `main`. The role trusts the environment, not a branch, so this
-  is what keeps other branches out.
-- **Environment variables:**
-  - `AWS_DEPLOY_ROLE_ARN`: the ARN printed by `create-role`.
-  - `AWS_REGION`: `eu-north-1`.
-  - `VERITY_INSTANCE_ID`: your instance ID.
+  then add `main`.
 
-  None of these are secrets.
+On the server, install the poller from the commit that added it:
+
+```bash
+git -C /opt/verity-src fetch -q origin main && git -C /opt/verity-src checkout -q origin/main
+install -m 750 /opt/verity-src/deploy/aws/deploy.sh /opt/verity-src/deploy/aws/deploy-poll.sh /opt/verity/
+install -m 644 /opt/verity-src/deploy/aws/verity-deploy.service /opt/verity-src/deploy/aws/verity-deploy.timer /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now verity-deploy.timer
+```
 
 ### Using it
 
-Merge to `main`. The run builds and pushes, then the `deploy` job shows
+Merge to `main`. The run builds and pushes, then the `release` job shows
 **Waiting for review**. Click **Review deployments**, then **Approve and
-deploy**, and the job log shows `deploy.sh`'s output. A failed health check
-rolls the server back and marks the run as failed.
+deploy**. Within about 2 minutes the server deploys it:
+
+```bash
+journalctl -u verity-deploy --since "10 min ago" --no-pager   # deploy.sh output
+systemctl list-timers verity-deploy.timer                     # next check
+```
+
+**Roll back:** move the tag to the previous release. Either re-run an older
+workflow run's `release` job, or run this from your laptop:
+
+```bash
+git push -f origin <old-sha>:refs/tags/production
+```
 
 ## What this doesn't do
 

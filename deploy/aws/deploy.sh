@@ -6,8 +6,8 @@
 # containers' healthchecks. If they aren't healthy in time, it puts the
 # previous tag back and restarts again, so a bad image never stays live.
 #
-# Run as root - by hand, or by GitHub Actions through the verity-deploy SSM
-# document, which can run nothing but this script (deploy/ec2.md).
+# Run as root - by hand, or by deploy-poll.sh when the `production` git tag
+# moves to a new commit (deploy/ec2.md, "Automatic deploys").
 set -euo pipefail
 
 new=${1:-}
