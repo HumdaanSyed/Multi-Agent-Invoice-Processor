@@ -1,0 +1,11 @@
+# /etc/systemd/system/verity-deploy.timer - check for a new release every 2 minutes.
+[Unit]
+Description=Check for a new Verity release every 2 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+RandomizedDelaySec=15s
+
+[Install]
+WantedBy=timers.target

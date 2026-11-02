@@ -109,3 +109,32 @@ jobs:
             ${{ env.WEB_IMAGE }}:latest
             ${{ env.WEB_IMAGE }}:${{ github.sha }}
           cache-from: type=gha,scope=frontend
+
+
+  # Releases the commit just pushed, after a manual approval. Pull-based: this
+  # job holds no AWS access at all. It only moves the `production` git tag to
+  # this commit; the EC2 box polls that tag every 2 minutes
+  # (deploy/aws/verity-deploy.timer) and runs deploy/aws/deploy.sh, which
+  # pulls the images CI just pushed, health-checks them and rolls back on
+  # failure. The `production` environment requires a reviewer and is limited
+  # to main, so a merge waits for a click before it goes live.
+  release:
+    needs: build-and-push
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: production-release
+      cancel-in-progress: false
+    permissions:
+      contents: write  # move the `production` tag
+    steps:
+      - name: Point the production tag at this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Update the tag if it exists, create it otherwise.
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/production" -f sha="$GITHUB_SHA" -F force=true >/dev/null \
+            || gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref=refs/tags/production -f sha="$GITHUB_SHA" >/dev/null
+          echo "production -> $GITHUB_SHA. The server deploys it within ~2 minutes (journalctl -u verity-deploy on the box)."

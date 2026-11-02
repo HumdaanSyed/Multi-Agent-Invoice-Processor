@@ -149,7 +149,8 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 sudo git clone --depth 1 https://github.com/HumdaanSyed/Multi-Agent-Invoice-Processor.git /opt/verity-src
 sudo install -d -m 755 /opt/verity /etc/verity
 sudo install -m 644 /opt/verity-src/deploy/aws/docker-compose.yml /opt/verity/
-sudo install -m 750 /opt/verity-src/deploy/aws/fetch-secrets.sh /opt/verity-src/deploy/aws/backup.sh /opt/verity/
+sudo install -m 750 /opt/verity-src/deploy/aws/fetch-secrets.sh /opt/verity-src/deploy/aws/backup.sh /opt/verity-src/deploy/aws/deploy.sh /opt/verity-src/deploy/aws/deploy-poll.sh /opt/verity/
+sudo install -m 644 /opt/verity-src/deploy/aws/verity-deploy.service /opt/verity-src/deploy/aws/verity-deploy.timer /etc/systemd/system/
 sudo install -m 644 /opt/verity-src/deploy/aws/verity.service /etc/systemd/system/
 sudo install -m 600 /opt/verity-src/deploy/aws/config.env.example /etc/verity/config.env
 sudo nano /etc/verity/config.env    # fill in every value; IMAGE_TAG = the commit SHA
@@ -184,7 +185,7 @@ sudo certbot renew --dry-run
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now verity
+sudo systemctl enable --now verity verity-deploy.timer
 sudo docker compose -f /opt/verity/docker-compose.yml --env-file /etc/verity/config.env ps
 ```
 
@@ -235,17 +236,33 @@ sudo docker compose -f /opt/verity/docker-compose.yml --env-file /etc/verity/con
 sudo tail -f /var/log/nginx/access.log /var/log/nginx/error.log
 ```
 
-**Deploy a new version.** Set `IMAGE_TAG` in `/etc/verity/config.env` to
-the new commit SHA, then:
+**Deploy a new version.** Normally automatic: see
+[Automatic deploys](#automatic-deploys-pull-based) below. By hand,
+with the full SHA of a commit CI has built:
 
 ```bash
-sudo docker compose -f /opt/verity/docker-compose.yml --env-file /etc/verity/config.env pull
-sudo systemctl restart verity
+sudo /opt/verity/deploy.sh <40-char-sha>
 ```
 
-**Roll back.** Set `IMAGE_TAG` back to the previous SHA and run the same
-two commands. The checkpoint schema is LangGraph's own, so rolling back
-across a LangGraph major version may need a restore as well.
+`deploy.sh` pulls first (a failed pull changes nothing), swaps `IMAGE_TAG`,
+restarts, and waits up to 180 s for both healthchecks. If they don't pass,
+it puts the previous tag back automatically and exits non-zero.
+
+**Roll back.** Run `deploy.sh` with the previous SHA (`git log` or the
+GitHub Actions history has them). The checkpoint schema is LangGraph's own,
+so rolling back across a LangGraph major version may need a restore as well.
+
+**Deploy-file changes.** `deploy.sh` only swaps images. When a commit also
+changes `deploy/aws/` (compose file, scripts), refresh the server's copy:
+
+```bash
+sudo git -C /opt/verity-src fetch -q && sudo git -C /opt/verity-src checkout -q <sha>
+sudo install -m 644 /opt/verity-src/deploy/aws/docker-compose.yml /opt/verity/
+sudo install -m 750 /opt/verity-src/deploy/aws/{fetch-secrets,backup,deploy,deploy-poll}.sh /opt/verity/
+```
+
+The nginx config is installed with your domain substituted (§10), so
+re-apply it the same way only when it changes.
 
 **Rotate a secret.** Update the value in Secrets Manager, then run
 `sudo systemctl restart verity`. The unit re-fetches on every start.
@@ -269,6 +286,64 @@ stay correct.
 **Instance lost.** Repeat steps 6–12 with the same role and security group,
 move the Elastic IP across, then restore the checkpoint DB as above.
 Everything else lives in Supabase.
+
+## Automatic deploys (pull-based)
+
+After the images are pushed, the `release` job in
+`.github/workflows/docker-build.yml` waits for your approval in the
+`production` GitHub environment. Then it moves the **`production` git tag**
+to that commit, and that's all it does.
+
+On the server, `verity-deploy.timer` runs
+[`aws/deploy-poll.sh`](aws/deploy-poll.sh) every 2 minutes. It reads the
+tag with `git ls-remote` (the repo is public, so no credentials are
+involved) and, if the tag differs from the live `IMAGE_TAG`, runs
+`deploy.sh`, which health-checks the new version and rolls back on failure.
+A release that fails is remembered and not retried. Moving the tag to
+another commit clears that.
+
+**Why pull, not push:** GitHub holds **no access to AWS at all**. There are
+no keys, no OIDC role and no SSM permissions, and nothing in AWS trusts
+GitHub. The most a compromised workflow could do is move a tag to a commit
+whose images CI already built, and the server still health-checks that
+before keeping it. (A push-based OIDC deploy needs
+`iam:CreateOpenIDConnectProvider`, which AWS Free-plan accounts block.)
+
+### One-time setup
+
+In GitHub, open the repo → **Settings → Environments → New environment**,
+named `production`:
+
+- **Required reviewers:** add yourself. This is the approval gate.
+- **Deployment branches and tags:** choose **Selected branches and tags**,
+  then add `main`.
+
+On the server, install the poller from the commit that added it:
+
+```bash
+git -C /opt/verity-src fetch -q origin main && git -C /opt/verity-src checkout -q origin/main
+install -m 750 /opt/verity-src/deploy/aws/deploy.sh /opt/verity-src/deploy/aws/deploy-poll.sh /opt/verity/
+install -m 644 /opt/verity-src/deploy/aws/verity-deploy.service /opt/verity-src/deploy/aws/verity-deploy.timer /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now verity-deploy.timer
+```
+
+### Using it
+
+Merge to `main`. The run builds and pushes, then the `release` job shows
+**Waiting for review**. Click **Review deployments**, then **Approve and
+deploy**. Within about 2 minutes the server deploys it:
+
+```bash
+journalctl -u verity-deploy --since "10 min ago" --no-pager   # deploy.sh output
+systemctl list-timers verity-deploy.timer                     # next check
+```
+
+**Roll back:** move the tag to the previous release. Either re-run an older
+workflow run's `release` job, or run this from your laptop:
+
+```bash
+git push -f origin <old-sha>:refs/tags/production
+```
 
 ## What this doesn't do
 

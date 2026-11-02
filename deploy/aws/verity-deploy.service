@@ -1,0 +1,12 @@
+# /etc/systemd/system/verity-deploy.service - one release check (see deploy-poll.sh).
+# Logs: journalctl -u verity-deploy
+[Unit]
+Description=Verity release check (deploys the commit the production tag points at)
+Requires=docker.service
+After=verity.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/verity/deploy-poll.sh
+TimeoutStartSec=600
