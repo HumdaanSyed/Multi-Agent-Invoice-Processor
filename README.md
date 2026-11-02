@@ -38,8 +38,9 @@ flowchart LR
 - **FastAPI**: the server behind the website.
 - **Supabase**: the database that stores invoices and their PDFs.
 - **Langfuse**: records every run so problems are easy to trace.
+- **Supabase Auth + Google sign-in**: only allowlisted accounts get in; the server checks every request's signed token ([how it works](docs/auth.md)).
 - **Docker**: packages the app so it runs the same way anywhere.
-- **Railway**: hosts the live demo.
+- **AWS EC2**: hosts it behind HTTPS, with secrets in AWS Secrets Manager ([deploy guide](deploy/ec2.md)).
 
 ## Run it yourself
 
@@ -53,7 +54,7 @@ cd Multi-Agent-Invoice-Processor
 uv sync --locked
 ```
 
-Create your settings file, then open `.env` and add your Anthropic and Supabase keys:
+Create your settings file, then open `.env` and add your Anthropic and Supabase keys, plus `SUPABASE_PUBLISHABLE_KEY` and your Supabase user id as `OWNER_USER_ID` (sign-in setup is in [docs/auth.md](docs/auth.md#local-development)):
 
 ```bash
 cp .env.example .env
@@ -73,5 +74,5 @@ docker compose up
 
 ## Limitations
 
-- There is no login, so anyone with the link can use it and spend your Claude credits. Do not deploy it with real invoices.
-- Importing invoices from Gmail only runs from your own computer, not from the deployed site.
+- It's built for one owner: Gmail import reads only the owner's mailbox, and the CSV ledger is shared, so only the owner can export it.
+- It runs on a single server, so there is no failover.

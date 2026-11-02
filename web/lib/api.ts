@@ -5,20 +5,17 @@
  * (app/models.py's ErrorResponse, see app/errors.py).
  */
 
-import { API_BASE_URL, SERVER_API_BASE_URL } from "./config";
+import { BROWSER_API_BASE } from "./config";
 import type {
   ErrorResponse,
   ExportStatusResponse,
-  HealthResponse,
   InboxItem,
   InboxSource,
   Invoice,
   InvoiceCorrections,
   McpCall,
-  ReadinessResponse,
   RunEvent,
   RunEventType,
-  RunListResponse,
   RunResponse,
   RunTicket,
 } from "./types";
@@ -39,18 +36,20 @@ export class ApiError extends Error {
   }
 }
 
-const SERVER_FETCH_TIMEOUT_MS = 5000;
+/** Browser calls go through the same-origin /api proxy (the session cookie
+ * rides along automatically). Server components use lib/server-api.ts,
+ * which calls the backend directly with the user's token. Browser calls
+ * stay unbounded - POST /invoices legitimately blocks for the full
+ * extraction (docs/api.md). */
+function request<T>(path: string, init?: RequestInit): Promise<T> {
+  return fetch(`${BROWSER_API_BASE}${path}`, init).then((response) => parseResponse<T>(response));
+}
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  // Server components (the home page) fetch from the Next.js server, which
-  // may reach the backend at a different address than the browser does.
-  const baseUrl = typeof window === "undefined" ? SERVER_API_BASE_URL : API_BASE_URL;
-  // Only server-side fetches get a timeout: the home page awaits these on
-  // every render, so a hung backend would otherwise hang the page itself.
-  // Browser calls stay unbounded - POST /invoices legitimately blocks for
-  // the full extraction (docs/api.md).
-  const signal = typeof window === "undefined" ? AbortSignal.timeout(SERVER_FETCH_TIMEOUT_MS) : undefined;
-  const response = await fetch(`${baseUrl}${path}`, { signal, ...init });
+export async function parseResponse<T>(response: Response): Promise<T> {
+  // Session expired or signed out elsewhere while this tab was open: back to login.
+  if (response.status === 401 && typeof window !== "undefined") {
+    window.location.assign("/login");
+  }
   if (!response.ok) {
     // Every error this API raises deliberately (app/errors.py) - plus
     // FastAPI's own validation errors - comes back as this one JSON shape.
@@ -64,14 +63,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(response.status, body);
   }
   return response.json() as Promise<T>;
-}
-
-export function getHealth(): Promise<HealthResponse> {
-  return request("/health");
-}
-
-export function getReadiness(): Promise<ReadinessResponse> {
-  return request("/health/ready");
 }
 
 /** Mint a thread_id and open its SSE channel before any upload exists -
@@ -110,10 +101,6 @@ export function resumeRun(threadId: string, corrections?: InvoiceCorrections): P
   });
 }
 
-export function listRuns(limit = 20): Promise<RunListResponse> {
-  return request(`/invoices?limit=${limit}`);
-}
-
 export function listInbox(source: InboxSource, limit = 10): Promise<McpCall & { items: InboxItem[] }> {
   return request(`/inbox?source=${source}&limit=${limit}`);
 }
@@ -133,7 +120,7 @@ export const markInboxItem = (source: InboxSource, id: string) => inboxPost<{ ma
 
 /** A PDF the download tool saved on the server, fetched to start a normal run. */
 export function inboxFileUrl(name: string): string {
-  return `${API_BASE_URL}/inbox/files/${encodeURIComponent(name)}`;
+  return `${BROWSER_API_BASE}/inbox/files/${encodeURIComponent(name)}`;
 }
 
 export function getExportStatus(): Promise<ExportStatusResponse> {
@@ -144,7 +131,7 @@ export function getExportStatus(): Promise<ExportStatusResponse> {
  * (or navigate to it) rather than fetching it, so the browser handles the
  * download and Content-Disposition filename itself. */
 export function exportCsvUrl(): string {
-  return `${API_BASE_URL}/export.csv`;
+  return `${BROWSER_API_BASE}/export.csv`;
 }
 
 /** `afterEventId`, when given, skips replaying history up through that id -
@@ -152,7 +139,7 @@ export function exportCsvUrl(): string {
  * rather than the Last-Event-ID header a native EventSource reconnect
  * would send. */
 export function streamUrl(threadId: string, afterEventId?: string): string {
-  const base = `${API_BASE_URL}/invoices/${encodeURIComponent(threadId)}/stream`;
+  const base = `${BROWSER_API_BASE}/invoices/${encodeURIComponent(threadId)}/stream`;
   return afterEventId ? `${base}?last_event_id=${encodeURIComponent(afterEventId)}` : base;
 }
 

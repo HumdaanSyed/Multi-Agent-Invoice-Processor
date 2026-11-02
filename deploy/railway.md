@@ -1,5 +1,12 @@
 # Railway — public deployment
 
+> **Predates authentication — not re-verified.** Since the auth work
+> (`docs/auth.md`), the browser no longer calls the backend: skip the
+> backend's public domain, `CORS_ALLOW_ORIGINS` and `API_PUBLIC_URL` below.
+> Instead give the frontend `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`,
+> `OWNER_USER_ID`, `SITE_URL` and `API_INTERNAL_URL`, and the backend
+> `OWNER_USER_ID`. The maintained path is [ec2.md](ec2.md).
+
 Phase 10's primary deploy target. Two services — the FastAPI `backend` and
 the Next.js `frontend` (Verity) — each running an image
 `.github/workflows/docker-build.yml` publishes to GHCR

@@ -15,7 +15,7 @@ import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command, StateSnapshot
@@ -35,6 +35,9 @@ from invoice_agent.graph import build_invoke_config
 from invoice_agent.schema import Invoice
 
 logger = logging.getLogger("app.service")
+
+# Upper bound on checkpoints list_runs() scans when owner scoping filters many out.
+MAX_LIST_OVERFETCH = 5000
 
 DEFAULT_MAX_CONCURRENCY = 2
 SEMAPHORE_ACQUIRE_TIMEOUT = 30  # seconds
@@ -359,7 +362,9 @@ class GraphService:
             finally:
                 self._publish_run_end(thread_id)
 
-    def list_runs(self, limit: int = 20, overfetch: int = 200) -> list[DerivedStatus | dict]:
+    def list_runs(
+        self, limit: int = 20, overfetch: int = 200, visible: Callable[[str], bool] | None = None
+    ) -> list[DerivedStatus | dict]:
         """Recent runs, newest first, deduped by thread_id.
 
         `checkpointer.list` yields one row per *checkpoint*, not per
@@ -375,9 +380,21 @@ class GraphService:
         single `for checkpoint_tuple in checkpointer.list(...): ...
         get_state(...)` loop) deadlocks the thread against itself -
         verified directly (test hung until this was fixed).
-        """
-        checkpoint_tuples = list(self._graph.checkpointer.list(None, limit=overfetch))
 
+        `visible` (owner scoping) skips other users' threads, which still use
+        up the overfetch window - so when the window was full but too few
+        rows matched, widen it and retry, up to a hard cap.
+        """
+        while True:
+            checkpoint_tuples = list(self._graph.checkpointer.list(None, limit=overfetch))
+            rows = self._summarize(checkpoint_tuples, limit, visible)
+            if len(rows) >= limit or len(checkpoint_tuples) < overfetch or overfetch >= MAX_LIST_OVERFETCH:
+                return rows
+            overfetch *= 4
+
+    def _summarize(
+        self, checkpoint_tuples: list, limit: int, visible: Callable[[str], bool] | None
+    ) -> list[dict]:
         rows: list[dict] = []
         seen: set[str] = set()
         for checkpoint_tuple in checkpoint_tuples:
@@ -385,6 +402,8 @@ class GraphService:
             if thread_id in seen:
                 continue
             seen.add(thread_id)
+            if visible is not None and not visible(thread_id):
+                continue
 
             snapshot = self._graph.get_state({"configurable": {"thread_id": thread_id}})
             derived = derive_status(snapshot)

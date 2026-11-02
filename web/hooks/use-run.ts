@@ -390,8 +390,11 @@ export function useRun(threadId: string) {
           }
         })
         .catch(() => {
-          dispatch({ type: "error", message: "Couldn't find that run." });
-          if (!cancelled && hasInFlightUpload) {
+          // With an upload in flight, a 404 just means its first checkpoint
+          // isn't written yet - the stream below carries the run, not an error.
+          if (!hasInFlightUpload) {
+            dispatch({ type: "error", message: "Couldn't find that run." });
+          } else if (!cancelled) {
             openStream();
           }
         });

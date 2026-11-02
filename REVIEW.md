@@ -584,9 +584,51 @@ the general lesson, which applies to any UI layer or multi-service image.)
   address in the DOM (React doesn't patch mismatched attributes). General
   shape: when one artifact is built once and run in many places, anything
   environment-specific must be read at run time, and anything read on both
-  sides of a network boundary needs a per-side value.
+  sides of a network boundary needs a per-side value. (Superseded by the
+  auth work: the browser now only calls the frontend's own `/api` proxy,
+  so `API_PUBLIC_URL`, the window global and CORS are gone - but the
+  "read at run time" rule still holds for every frontend env var.)
+
+- **An identifier passed into a protocol that gives it extra syntax.**
+  (Auth phase) `gmail_imap.py` passed the caller's `id` straight into IMAP
+  `UID FETCH`/`UID STORE`. IMAP ids are *sequence sets*, so `"1:*"` is a
+  valid id meaning "every message" - one `mark` call would mark the whole
+  inbox read. Validate ids to the exact shape you mean (`^\d{1,10}$`, one
+  UID) at the tool itself, not only at the HTTP layer: MCP tools are
+  callable without HTTP. Same family as path components, SQL LIKE
+  patterns, and Gmail search strings.
+
+- **An auth library's "safe" option that silently doesn't apply.** (Auth
+  phase) `@supabase/ssr`'s `cookieOptions: { httpOnly: true }` is ignored
+  for the PKCE code-verifier cookies (it defaults every cookie to
+  `httpOnly: false` for its browser client). Enforce security flags at the
+  last point every cookie passes through (`setAll`), and verify with a real
+  `Set-Cookie` header, not by reading the config. Also: Next dev's HMR can
+  serve a stale module where a newly exported const is `undefined` -
+  restart the dev server before concluding a fix didn't work.
+
+- **Authorization checked after the resource is read, or by a path the
+  check doesn't cover.** (Auth phase) Every per-run route must call
+  `_authorize_thread` *before* touching the snapshot, and list endpoints
+  must filter by owner (`service.list_runs(visible=...)`) - a 404-vs-403
+  difference, or a list that includes other users' ids, leaks existence.
+  Any new route on `router` inherits `require_allowed`, but per-object
+  ownership is per-route and easy to forget; `tests/test_auth.py` is where
+  each new run-scoped route gets its cross-user test.
 
 ## Known intentional patterns — do not re-flag
+
+- `AUTH_DISABLED=true` (app/auth.py) bypasses JWT verification. It exists
+  for tests (`tests/conftest.py` sets it for the non-auth suites) and local
+  scripts, logs a warning at startup, and is never set in deploy/. Don't
+  flag its existence; do flag it appearing in a deploy file or compose.
+- The Next.js `/api` route handler calls `getSession()` after
+  `getClaims()`: `getClaims()` is the verification, `getSession()` only
+  supplies the raw token to forward, and FastAPI re-verifies it. Not the
+  "trusting getSession()" anti-pattern.
+- Unknown thread ids return 403 (not 404) to non-owners: `owners.can_access`
+  treats an unclaimed id as the owner's (legacy runs predate ownership), so
+  existence can't be probed. Intentional.
 
 - The `invoice_exports` Postgres table (Phase 8.6, replacing the earlier
   local `exports/invoices.csv` file) is an **append-only audit log**, not

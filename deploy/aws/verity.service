@@ -1,0 +1,22 @@
+# /etc/systemd/system/verity.service - fetches secrets, then starts the stack.
+# Restarting this unit is also how a secret rotation or IMAGE_TAG change is applied.
+[Unit]
+Description=Verity invoice processor (docker compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/verity/config.env
+# The AWS CLI is a snap on Ubuntu 24.04; systemd's default PATH lacks /snap/bin.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+ExecStartPre=/opt/verity/fetch-secrets.sh
+ExecStart=/usr/bin/docker compose -f /opt/verity/docker-compose.yml --env-file /etc/verity/config.env up -d --remove-orphans
+ExecStop=/usr/bin/docker compose -f /opt/verity/docker-compose.yml --env-file /etc/verity/config.env down
+ExecStopPost=/usr/bin/rm -f /run/verity/secrets.env
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

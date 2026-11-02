@@ -17,8 +17,8 @@ services:
   backend:
     build: .
     image: invoice-agent:local
-    ports:
-      - "8000:8000"
+    # No ports: the backend is reachable only on the compose network, by the
+    # frontend's /api proxy. Nothing outside Docker can call it directly.
     env_file:
       - .env
     volumes:
@@ -34,17 +34,21 @@ services:
   frontend:
     build: ./web
     image: verity-web:local
+    # Loopback only: on a server, nginx in front terminates TLS (deploy/aws.md).
     ports:
-      - "3000:3000"
-    # No env_file: the frontend never needs ANTHROPIC_API_KEY/SUPABASE_*, and
-    # a container that doesn't receive them can't leak them.
+      - "127.0.0.1:3000:3000"
+    # No env_file: only these non-secret values are interpolated from .env,
+    # so the frontend never receives ANTHROPIC_API_KEY, SUPABASE_KEY or GMAIL_*
+    # - a container that doesn't hold them can't leak them.
     environment:
-      # What the *browser* calls - it runs on the host, so the published
-      # port, not the compose-internal service name. The backend's default
-      # CORS allow-list (localhost:3000) already covers this origin.
-      API_PUBLIC_URL: http://localhost:8000
-      # What the Next.js *server* calls - inside the compose network,
-      # service names resolve and localhost would be this container itself.
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY}
+      OWNER_USER_ID: ${OWNER_USER_ID:-}
+      ALLOWED_USER_IDS: ${ALLOWED_USER_IDS:-}
+      # OAuth redirect origin; without it a standalone container may build the
+      # callback from its own bind address, which Supabase won't accept.
+      SITE_URL: http://localhost:3000
+      # Inside the compose network, service names resolve.
       API_INTERNAL_URL: http://backend:8000
     depends_on:
       backend:

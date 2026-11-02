@@ -11,9 +11,10 @@ loop free for concurrent `/health` and `/docs` requests while a blocking
 `graph.invoke()` runs. `GET /health` is the one exception: zero I/O, no
 reason not to stay on the event loop.
 
-Route paths here are mirrored by hand in deploy/ec2.md's nginx `location`
-regex (browser and backend share one origin there) - add or rename a route
-and update that block too.
+Every route here except /health requires a verified Supabase JWT (app/auth.py).
+The browser reaches them only through the Next.js /api proxy, whose path
+allowlist (web/app/api/[...path]/route.ts) must be updated when a route the
+UI needs is added or renamed.
 """
 
 from __future__ import annotations
@@ -33,12 +34,14 @@ from anthropic import (
     PermissionDeniedError,
     RateLimitError,
 )
-from fastapi import APIRouter, File, Form, Query, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from app.auth import User, require_allowed, require_owner
 from app.errors import (
     ApiError,
+    Forbidden,
     PdfUnprocessable,
     PersistenceFailed,
     RunFailed,
@@ -63,8 +66,18 @@ from app.service import DerivedStatus, GraphService, derive_status
 from app.uploads import save_upload, sweep_old_uploads
 from invoice_agent import db, events, tracing
 
-router = APIRouter()
+# Every route here needs a verified, allowlisted user; /health stays public
+# (zero-I/O liveness for Docker) on its own router below.
+router = APIRouter(dependencies=[Depends(require_allowed)])
+health_router = APIRouter()
 logger = logging.getLogger("app.routes")
+
+
+def _authorize_thread(request: Request, thread_id: str, user: User) -> None:
+    """Owner-scoping: a valid token isn't enough, the run must be this
+    user's (app/owners.py). Checked before anything about the run is read."""
+    if not request.app.state.owners.can_access(thread_id, user):
+        raise Forbidden("You don't have access to this run.")
 
 
 def _service(request: Request) -> GraphService:
@@ -139,8 +152,8 @@ def _translate_graph_exception(exc: Exception, thread_id: str, *, failed_node: s
     doesn't know yet whether it's worth a log line at all - a 404 or a 422
     isn't); this is the one place a *graph* failure is turned into a safe,
     generic response, so it's the right place to keep the real exception
-    (with its `__cause__`/traceback, and everything output()'s RuntimeError
-    embeds - vendor_name, invoice_number, storage path) somewhere an
+    (with its `__cause__`/traceback, and the thread_id and storage path
+    output()'s RuntimeError embeds) somewhere an
     operator can actually find it, rather than only in the checkpointer's
     `tasks[].error` column.
 
@@ -182,7 +195,7 @@ def _translate_graph_exception(exc: Exception, thread_id: str, *, failed_node: s
 
 
 @router.post("/invoices/reserve", response_model=RunTicket)
-def reserve_invoice_run(request: Request) -> RunTicket:
+def reserve_invoice_run(request: Request, user: User = Depends(require_allowed)) -> RunTicket:
     """Mint a thread_id and open its SSE channel *before* any upload or
     graph work exists (Phase 8.5).
 
@@ -197,18 +210,23 @@ def reserve_invoice_run(request: Request) -> RunTicket:
     """
     service = _service(request)
     thread_id = service.reserve()
+    request.app.state.owners.claim(thread_id, user.id)
     return RunTicket(thread_id=thread_id, stream_url=f"/invoices/{thread_id}/stream")
 
 
 @router.post("/invoices", response_model=RunResponse)
 def create_invoice_run(
-    request: Request, file: UploadFile = File(...), thread_id: str | None = Form(None)
+    request: Request,
+    file: UploadFile = File(...),
+    thread_id: str | None = Form(None),
+    user: User = Depends(require_allowed),
 ) -> RunResponse:
     service = _service(request)
     upload_dir = request.app.state.upload_dir
     sweep_old_uploads(upload_dir)
 
     if thread_id is not None:
+        _authorize_thread(request, thread_id, user)
         # A reserved id, from POST /invoices/reserve - not client-invented.
         # save_upload() builds a filesystem path from thread_id, so this
         # must be a value this server minted, never an arbitrary string a
@@ -224,6 +242,7 @@ def create_invoice_run(
             )
     else:
         thread_id = str(uuid.uuid4())
+        request.app.state.owners.claim(thread_id, user.id)
 
     pdf_path = save_upload(file, thread_id=thread_id, upload_dir=upload_dir)
 
@@ -238,7 +257,9 @@ def create_invoice_run(
 
 
 @router.get("/invoices/{thread_id}/stream")
-async def stream_invoice_run(thread_id: str, request: Request) -> StreamingResponse:
+async def stream_invoice_run(
+    thread_id: str, request: Request, user: User = Depends(require_allowed)
+) -> StreamingResponse:
     """SSE feed of a run's progress - field-by-field extraction events,
     per-check validation events, stage changes, and a terminal event.
 
@@ -260,7 +281,13 @@ async def stream_invoice_run(thread_id: str, request: Request) -> StreamingRespo
         sees everything, and `Last-Event-ID` reconnects pick up where
         they left off), then live events, until `run_end`/`interrupted`
         closes the connection.
+
+    Authenticated and owner-checked before any byte is streamed. The browser's
+    EventSource can't set an Authorization header, so it calls the same-origin
+    Next.js /api proxy with its session cookie, and the proxy adds the bearer
+    token (web/app/api/[...path]/route.ts).
     """
+    _authorize_thread(request, thread_id, user)
     service = _service(request)
 
     def _snapshot_events(derived: DerivedStatus) -> list[events.Event]:
@@ -361,7 +388,7 @@ def _get_derived_or_none(service: GraphService, thread_id: str) -> DerivedStatus
 
 
 @router.get("/invoices/{thread_id}", response_model=RunResponse)
-def get_invoice_run(thread_id: str, request: Request) -> RunResponse:
+def get_invoice_run(thread_id: str, request: Request, user: User = Depends(require_allowed)) -> RunResponse:
     """The one place `pdf_url`/`trace_url` get populated (see RunResponse's
     docstring) - both are best-effort convenience links for the frontend's
     read-only detail view (docs/FRONTEND_PLAN.md's Phase 9D), so a request
@@ -377,6 +404,7 @@ def get_invoice_run(thread_id: str, request: Request) -> RunResponse:
     historical invoice's "source PDF" link isn't permanently missing just
     because its checkpoint predates this column.
     """
+    _authorize_thread(request, thread_id, user)
     service = _service(request)
     snapshot = service.get_snapshot(thread_id)
     derived = derive_status(snapshot)
@@ -396,7 +424,10 @@ def get_invoice_run(thread_id: str, request: Request) -> RunResponse:
 
 
 @router.post("/invoices/{thread_id}/resume", response_model=RunResponse)
-def resume_invoice_run(thread_id: str, body: ResumeRequest, request: Request) -> RunResponse:
+def resume_invoice_run(
+    thread_id: str, body: ResumeRequest, request: Request, user: User = Depends(require_allowed)
+) -> RunResponse:
+    _authorize_thread(request, thread_id, user)
     service = _service(request)
     try:
         service.resume_run(thread_id, body.corrections)
@@ -409,9 +440,12 @@ def resume_invoice_run(thread_id: str, body: ResumeRequest, request: Request) ->
 
 
 @router.get("/invoices", response_model=RunListResponse)
-def list_invoice_runs(request: Request, limit: int = Query(20, ge=1, le=100)) -> RunListResponse:
+def list_invoice_runs(
+    request: Request, limit: int = Query(20, ge=1, le=100), user: User = Depends(require_allowed)
+) -> RunListResponse:
     service = _service(request)
-    rows = service.list_runs(limit=limit)
+    owners = request.app.state.owners
+    rows = service.list_runs(limit=limit, visible=lambda thread_id: owners.can_access(thread_id, user))
     return RunListResponse(runs=[RunSummary(**row) for row in rows])
 
 
@@ -474,7 +508,7 @@ def _export_csv_chunks():
     yield from _stream_csv_rows(_ledger_csv_rows(), writer, buffer, error_row)
 
 
-@router.get("/export.csv")
+@router.get("/export.csv", dependencies=[Depends(require_owner)])
 def download_export_csv() -> StreamingResponse:
     """The full export ledger, ordered oldest-first, as a CSV download -
     every successful invoice write ever persisted, including every
@@ -487,7 +521,7 @@ def download_export_csv() -> StreamingResponse:
     )
 
 
-@router.get("/export/status", response_model=ExportStatusResponse)
+@router.get("/export/status", response_model=ExportStatusResponse, dependencies=[Depends(require_owner)])
 def export_status() -> ExportStatusResponse:
     """Row count and freshness of the export ledger, for a persistent
     "N invoices exported" UI element that doesn't need to download the
@@ -495,7 +529,7 @@ def export_status() -> ExportStatusResponse:
     return ExportStatusResponse(**db.export_status())
 
 
-@router.get("/health", response_model=HealthResponse)
+@health_router.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     """Static liveness - zero I/O. What Phase 10's Docker HEALTHCHECK hits;
     see app/health.py's module docstring for why this must never make a
@@ -503,7 +537,9 @@ async def health() -> HealthResponse:
     return HealthResponse(status="ok")
 
 
-@router.get("/health/ready", response_model=ReadinessResponse)
+# Deep readiness reports which services are configured and can make live
+# calls, so it's owner-only (and unreachable from outside the private network).
+@health_router.get("/health/ready", response_model=ReadinessResponse, dependencies=[Depends(require_owner)])
 def readiness(request: Request, response: Response, deep: bool = Query(False)) -> ReadinessResponse:
     service = _service(request)
     result = check_readiness(service, deep=deep)

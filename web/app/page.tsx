@@ -4,8 +4,7 @@ import { RecentRuns } from "@/components/recent-runs";
 import { STEPS } from "@/components/pipeline-steps";
 import { Chip, ErrorBox } from "@/components/primitives";
 import { UploadZone } from "@/components/upload-zone";
-import { getExportStatus, getHealth, listRuns } from "@/lib/api";
-import { SERVER_API_BASE_URL } from "@/lib/config";
+import { getExportStatus, getHealth, listRuns } from "@/lib/server-api";
 import type { ExportStatusResponse, RunSummary } from "@/lib/types";
 import { formatDateTime } from "@/lib/utils";
 
@@ -74,8 +73,7 @@ export default async function Home() {
         {!backendOk && (
           <div className="mt-4">
             <ErrorBox>
-              <strong className="font-semibold">Can&apos;t reach the backend at </strong>
-              <span className="break-all font-mono text-xs">{SERVER_API_BASE_URL}</span>
+              <strong className="font-semibold">Can&apos;t reach the backend.</strong> Uploads will fail until it&apos;s back.
             </ErrorBox>
           </div>
         )}
