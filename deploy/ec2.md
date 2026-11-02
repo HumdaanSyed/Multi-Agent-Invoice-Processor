@@ -149,7 +149,7 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 sudo git clone --depth 1 https://github.com/HumdaanSyed/Multi-Agent-Invoice-Processor.git /opt/verity-src
 sudo install -d -m 755 /opt/verity /etc/verity
 sudo install -m 644 /opt/verity-src/deploy/aws/docker-compose.yml /opt/verity/
-sudo install -m 750 /opt/verity-src/deploy/aws/fetch-secrets.sh /opt/verity-src/deploy/aws/backup.sh /opt/verity-src/deploy/aws/deploy.sh /opt/verity-src/deploy/aws/deploy-poll.sh /opt/verity/
+sudo install -m 750 /opt/verity-src/deploy/aws/fetch-secrets.sh /opt/verity-src/deploy/aws/backup.sh /opt/verity-src/deploy/aws/deploy.sh /opt/verity-src/deploy/aws/deploy-poll.sh /opt/verity-src/deploy/aws/allow-user.sh /opt/verity/
 sudo install -m 644 /opt/verity-src/deploy/aws/verity-deploy.service /opt/verity-src/deploy/aws/verity-deploy.timer /etc/systemd/system/
 sudo install -m 644 /opt/verity-src/deploy/aws/verity.service /etc/systemd/system/
 sudo install -m 600 /opt/verity-src/deploy/aws/config.env.example /etc/verity/config.env
@@ -258,11 +258,28 @@ changes `deploy/aws/` (compose file, scripts), refresh the server's copy:
 ```bash
 sudo git -C /opt/verity-src fetch -q && sudo git -C /opt/verity-src checkout -q <sha>
 sudo install -m 644 /opt/verity-src/deploy/aws/docker-compose.yml /opt/verity/
-sudo install -m 750 /opt/verity-src/deploy/aws/{fetch-secrets,backup,deploy,deploy-poll}.sh /opt/verity/
+sudo install -m 750 /opt/verity-src/deploy/aws/{fetch-secrets,backup,deploy,deploy-poll,allow-user}.sh /opt/verity/
 ```
 
 The nginx config is installed with your domain substituted (§10), so
 re-apply it the same way only when it changes.
+
+**Let another Google account in.** Sign-up is disabled, so first create
+their user: Supabase → **Authentication → Users → Add user → Create new
+user**, with their exact Google email and **Auto Confirm User** ticked, then
+copy the **User UID**. If your Google OAuth app is still in *Testing* mode,
+also add their address under **Test users** in Google Cloud (OAuth consent
+screen), or Google blocks them before they ever reach Verity. Then, on the
+server:
+
+```bash
+sudo /opt/verity/allow-user.sh add <uid>      # restarts the stack (a few seconds)
+sudo /opt/verity/allow-user.sh list
+sudo /opt/verity/allow-user.sh remove <uid>   # locked out on their next request
+```
+
+Allowed users can upload and process invoices and see only their own runs.
+The Gmail inbox, the CSV ledger and `/health/ready` stay owner-only.
 
 **Rotate a secret.** Update the value in Secrets Manager, then run
 `sudo systemctl restart verity`. The unit re-fetches on every start.
