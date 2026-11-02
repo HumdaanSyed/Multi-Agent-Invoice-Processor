@@ -7,6 +7,15 @@ checkpointer makes a run a long-lived, resumable entity, so a client gets
 one back from `POST /invoices` and uses it for every later call about that
 same run — a flagged invoice doesn't need to be re-uploaded to correct it.
 
+## Authentication
+
+Every endpoint except `GET /health` needs `Authorization: Bearer <Supabase
+access token>`, verified against the project's JWKS (`app/auth.py`); 401 for
+a missing/invalid token, 403 for a valid user without access. Runs are
+scoped to the user who created them; the ledger export, `/health/ready` and
+the inbox are owner-only. Browsers never call this API directly - the
+Next.js `/api` proxy adds the token. Details: [`auth.md`](auth.md).
+
 ## Endpoints
 
 | Method | Path | Returns |
@@ -172,7 +181,10 @@ invokes one tool; every response includes the tool name and how long it took
 (`ms`). The Gmail credentials are passed to the subprocess explicitly - the MCP
 SDK only forwards a minimal environment, and there's no `.env` file inside the
 container. Any MCP failure (missing credentials, IMAP login, search) comes back
-as a 503 `upstream_unavailable` with the server's message. The frontend's Inbox
+as a 503 `upstream_unavailable` with a generic message (the detail is logged
+server-side, never returned). Owner-only; ids are validated (a Gmail id is
+one numeric IMAP UID - never a set like `1:*`), listing is capped at 25, and
+only real PDFs ≤20 MB (≤5 per email) are downloaded. The frontend's Inbox
 page (`web/app/inbox/page.tsx`) exposes all three tools and processes a
 downloaded PDF through the normal reserve + upload flow.
 
@@ -188,7 +200,8 @@ downloaded PDF through the normal reserve + upload flow.
    uvicorn app.main:app --reload
    ```
 3. Open [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) — Swagger
-   UI. Upload a PDF via `POST /invoices`, note the `thread_id` it returns,
+   UI (set `AUTH_DISABLED=true` in `.env` to try endpoints there without a
+   token; dev only). Upload a PDF via `POST /invoices`, note the `thread_id` it returns,
    and resume it via `POST /invoices/{thread_id}/resume`.
 4. Verify: `GET /health` returns `{"status": "ok"}` with no delay (no
    network call happens); `GET /health/ready` reports which services are

@@ -8,6 +8,9 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from invoice_agent.mcp_servers import gmail_imap
 from invoice_agent.mcp_servers.gmail_imap import (
     _decode_mime_words,
     _pdf_attachment_filenames,
@@ -85,14 +88,14 @@ def test_pdf_attachments_returns_payload_bytes():
 def test_inline_disposition_pdf_detected():
     """Many billing/ERP mailers use Content-Disposition: inline, not
     'attachment' - must still be found."""
-    msg = _message_with_disposition("inline.pdf", b"%PDF fake", disposition="inline")
+    msg = _message_with_disposition("inline.pdf", b"%PDF-1.4 fake", disposition="inline")
     assert _pdf_attachment_filenames(msg) == ["inline.pdf"]
 
 
 def test_missing_disposition_header_pdf_detected():
     """Some mailers omit Content-Disposition entirely, relying on
     Content-Type's name= param - must still be found."""
-    msg = _message_with_disposition("noheader.pdf", b"%PDF fake", disposition=None)
+    msg = _message_with_disposition("noheader.pdf", b"%PDF-1.4 fake", disposition=None)
     assert _pdf_attachment_filenames(msg) == ["noheader.pdf"]
 
 
@@ -100,7 +103,7 @@ def test_rfc2047_encoded_filename_decoded_and_detected():
     """A MIME encoded-word filename (e.g. non-ASCII vendor name) must be
     decoded before the .pdf suffix check, or it's silently dropped."""
     encoded = "=?UTF-8?B?ZmFjdHVyZS5wZGY=?="  # "facture.pdf"
-    msg = _message_with_disposition(encoded, b"%PDF fake", disposition="attachment")
+    msg = _message_with_disposition(encoded, b"%PDF-1.4 fake", disposition="attachment")
     assert _pdf_attachment_filenames(msg) == ["facture.pdf"]
 
 
@@ -143,7 +146,7 @@ def _fake_conn(search_status="OK", search_uids=b"", fetch_bodies=None):
 
 
 def _raw_message_bytes(filename: str) -> bytes:
-    msg = _message_with_attachments((filename, b"%PDF fake", "application/pdf"))
+    msg = _message_with_attachments((filename, b"%PDF-1.4 fake", "application/pdf"))
     return msg.as_bytes()
 
 
@@ -207,3 +210,37 @@ def test_list_pending_invoices_skips_non_pdf_messages(mock_connect):
 
     results = list_pending_invoices(limit=10)
     assert [r["id"] for r in results] == ["201"]
+
+
+# --- Untrusted-input guards ---
+
+
+@pytest.mark.parametrize("bad", ["1:*", "1,2", "*", "", "abc", "1 2", "12345678901"])
+def test_uid_rejects_sequence_sets_and_junk(bad):
+    with pytest.raises(ValueError):
+        gmail_imap._uid(bad)
+
+
+@patch("invoice_agent.mcp_servers.gmail_imap._connect")
+def test_mark_processed_never_connects_with_a_bad_uid(mock_connect):
+    # "1:*" would mark every message in the inbox read.
+    with pytest.raises(ValueError):
+        gmail_imap.mark_processed("1:*")
+    mock_connect.assert_not_called()
+
+
+def test_pdf_named_non_pdf_payload_is_skipped():
+    msg = _message_with_attachments(("invoice.pdf", b"MZ\x90 not a pdf", "application/pdf"))
+    assert _pdf_attachments(msg) == []
+
+
+def test_oversized_attachment_is_skipped(monkeypatch):
+    monkeypatch.setattr(gmail_imap, "MAX_ATTACHMENT_BYTES", 10)
+    msg = _message_with_attachments(("invoice.pdf", b"%PDF-1.4 more than ten bytes", "application/pdf"))
+    assert _pdf_attachments(msg) == []
+
+
+def test_attachment_count_is_capped(monkeypatch):
+    monkeypatch.setattr(gmail_imap, "MAX_ATTACHMENTS_PER_MESSAGE", 2)
+    msg = _message_with_attachments(*[(f"i{n}.pdf", b"%PDF-1.4 x", "application/pdf") for n in range(4)])
+    assert len(_pdf_attachments(msg)) == 2

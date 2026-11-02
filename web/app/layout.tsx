@@ -1,12 +1,13 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import { connection } from "next/server";
 import Link from "next/link";
 import "./globals.css";
 import { ExportBar } from "@/components/export-bar";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { PRODUCT_NAME, PRODUCT_TAGLINE } from "@/lib/config";
 import { LedgerStatusProvider } from "@/lib/ledger-status-context";
+import { isAllowed } from "@/lib/supabase/env";
+import { createClient } from "@/lib/supabase/server";
 import { THEME_STORAGE_KEY } from "@/lib/theme";
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
@@ -18,11 +19,11 @@ export const metadata: Metadata = {
 };
 
 export default async function RootLayout({ children }: LayoutProps<"/">) {
-  // Opts the whole tree into dynamic rendering so API_PUBLIC_URL is read at
-  // request time (docs: environment-variables.md, "Runtime Environment
-  // Variables") - one prebuilt image, different backend per deployment.
-  await connection();
-  const apiPublicUrl = process.env.API_PUBLIC_URL;
+  // Reading the session cookie also opts the tree into dynamic rendering,
+  // so every env var below is read at request time, not baked in at build.
+  const { data } = await (await createClient()).auth.getClaims();
+  const signedIn = data?.claims?.sub && isAllowed(data.claims.sub) ? data.claims : null;
+  const email = typeof signedIn?.email === "string" ? signedIn.email : null;
 
   return (
     <html
@@ -39,14 +40,6 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
             __html: `try{var t=localStorage.getItem(${JSON.stringify(THEME_STORAGE_KEY)});if(t==="light"||t==="dark")document.documentElement.dataset.theme=t}catch(e){}`,
           }}
         />
-        {apiPublicUrl && (
-          <script
-            // "<" escaped so a hostile env value can't close the tag.
-            dangerouslySetInnerHTML={{
-              __html: `window.__VERITY_API_BASE_URL__=${JSON.stringify(apiPublicUrl).replace(/</g, "\\u003c")};`,
-            }}
-          />
-        )}
       </head>
       <body className="flex min-h-full flex-col bg-slate-50 font-sans text-slate-900 dark:bg-slate-950 dark:text-slate-100">
         <LedgerStatusProvider>
@@ -65,7 +58,7 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
                 </span>
               </Link>
               <div className="flex items-center gap-4">
-                <nav className="hidden items-center gap-4 text-sm font-medium text-slate-500 md:flex">
+                {signedIn && <nav className="hidden items-center gap-4 text-sm font-medium text-slate-500 md:flex">
                   <Link href="/#upload" className="transition hover:text-teal-600 dark:hover:text-teal-400">
                     Upload
                   </Link>
@@ -75,14 +68,22 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
                   <Link href="/inbox" className="transition hover:text-teal-600 dark:hover:text-teal-400">
                     Inbox
                   </Link>
-                </nav>
+                </nav>}
                 <span className="hidden font-mono text-xs uppercase tracking-wider text-slate-400 lg:inline">claude · langgraph</span>
                 <ThemeToggle />
+                {signedIn && (
+                  <form action="/auth/signout" method="post" className="flex items-center gap-3">
+                    {email && <span className="hidden max-w-48 truncate text-sm text-slate-500 sm:inline">{email}</span>}
+                    <button type="submit" className="text-sm font-medium text-slate-500 transition hover:text-teal-600 dark:hover:text-teal-400">
+                      Sign out
+                    </button>
+                  </form>
+                )}
               </div>
             </div>
           </header>
           <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6">{children}</main>
-          <ExportBar />
+          {signedIn && <ExportBar />}
         </LedgerStatusProvider>
       </body>
     </html>

@@ -41,6 +41,13 @@ from mcp.server.fastmcp import FastMCP
 IMAP_HOST = "imap.gmail.com"
 IMAP_PORT = 993
 
+# Hard limits, enforced here (the MCP tools are callable without the HTTP
+# layer, e.g. from the MCP Inspector) as well as in app/inbox.py.
+MAX_LIST = 25
+MAX_ATTACHMENTS_PER_MESSAGE = 5
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # same cap as a direct upload
+PDF_MAGIC = b"%PDF-"
+
 mcp = FastMCP("gmail-imap")
 
 
@@ -98,15 +105,28 @@ def _pdf_attachments(msg: Message) -> list[tuple[str, bytes]]:
         if not filename or not filename.lower().endswith(".pdf"):
             continue
         payload = part.get_payload(decode=True)
-        if payload is None:
+        # Untrusted attachment: only real PDFs (magic bytes, not just the
+        # name) under the size cap ever reach disk or the pipeline.
+        if payload is None or len(payload) > MAX_ATTACHMENT_BYTES or not payload.startswith(PDF_MAGIC):
             continue
         found.append((filename, payload))
+        if len(found) >= MAX_ATTACHMENTS_PER_MESSAGE:
+            break
     return found
 
 
 def _pdf_attachment_filenames(msg: Message) -> list[str]:
     """Thin wrapper over `_pdf_attachments` for callers that only need names."""
     return [filename for filename, _ in _pdf_attachments(msg)]
+
+
+def _uid(id: str) -> bytes:
+    """A single IMAP UID, digits only. Rejects sequence sets and ranges like
+    "1:*" or "1,2", which IMAP would happily apply to many messages (marking
+    the whole inbox read, or downloading every attachment)."""
+    if not isinstance(id, str) or not id.isdigit() or len(id) > 10:
+        raise ValueError("id must be a single numeric IMAP UID")
+    return id.encode()
 
 
 def _fetch_message(conn: imaplib.IMAP4_SSL, uid: bytes) -> Message | None:
@@ -135,6 +155,7 @@ def list_pending_invoices(limit: int = 10) -> list[dict]:
     caller's timeout, even though almost none of those messages are
     invoices.
     """
+    limit = max(0, min(int(limit), MAX_LIST))
     conn = _connect()
     try:
         gmail_query = "is:unread has:attachment filename:pdf"
@@ -180,9 +201,10 @@ def download_invoice_pdfs(id: str, dest_dir: str = "./attachments") -> list[str]
     Read-only w.r.t. the mailbox (BODY.PEEK); does not mark as read. Returns
     the local file paths written.
     """
+    uid = _uid(id)
     conn = _connect()
     try:
-        msg = _fetch_message(conn, id.encode())
+        msg = _fetch_message(conn, uid)
         if msg is None:
             return []
 
@@ -209,9 +231,10 @@ def download_invoice_pdfs(id: str, dest_dir: str = "./attachments") -> list[str]
 def mark_processed(id: str) -> bool:
     """Mark the given email UID as read (\\Seen) so future ingestion runs
     won't list it again. This is the only mailbox mutation this server does."""
+    uid = _uid(id)
     conn = _connect()
     try:
-        status, _ = conn.uid("store", id.encode(), "+FLAGS", "\\Seen")
+        status, _ = conn.uid("store", uid, "+FLAGS", "\\Seen")
         return status == "OK"
     finally:
         conn.logout()

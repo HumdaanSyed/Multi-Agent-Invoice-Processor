@@ -36,7 +36,7 @@ def _safe_inbox_path(id: str) -> Path | None:
     data/inbox/.
     """
     safe_name = Path(id).name
-    if not safe_name:
+    if not safe_name or safe_name != id or not safe_name.lower().endswith(".pdf"):
         return None
     return INBOX_DIR / safe_name
 
@@ -63,7 +63,7 @@ def list_pending_invoices(limit: int = 10) -> list[dict]:
             "source_description": str(p.relative_to(REPO_ROOT)),
             "attachment_filenames": [p.name],
         }
-        for p in pdfs[:limit]
+        for p in pdfs[: max(0, min(limit, 25))]
     ]
 
 

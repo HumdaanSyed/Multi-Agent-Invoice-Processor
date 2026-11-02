@@ -5,10 +5,9 @@
 # (next.config.ts): the runtime stage carries only server.js plus the traced
 # node_modules it needs, not the full dependency tree or the build toolchain.
 #
-# Build once, deploy anywhere: nothing deployment-specific is baked in. The
-# backend URLs are read at *request* time from API_PUBLIC_URL (what the
-# browser calls) and API_INTERNAL_URL (what this server calls) - see
-# lib/config.ts. That matters for deploy/ec2.md: `next build` needs more RAM
+# Build once, deploy anywhere: nothing deployment-specific is baked in.
+# SUPABASE_*, OWNER_USER_ID and API_INTERNAL_URL are read at *request* time
+# (lib/config.ts, lib/supabase/env.ts). That matters: `next build` needs more RAM
 # than a 1GB box has, so the image is built in CI and pulled, never built on
 # the target.
 

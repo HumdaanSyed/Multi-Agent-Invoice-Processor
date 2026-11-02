@@ -1,0 +1,65 @@
+# Production stack for one EC2 instance (deploy/ec2.md). Pulls the images CI
+# publishes to GHCR - nothing is built on the box. Run by verity.service:
+#   docker compose -f /opt/verity/docker-compose.yml --env-file /etc/verity/config.env up -d
+#
+# Network shape: host nginx (TLS, :443) -> frontend on 127.0.0.1:3000 ->
+# backend on the private compose network only. The backend publishes no
+# port at all, so the only way in is through the frontend's
+# session-checking /api proxy, and FastAPI re-verifies every JWT anyway.
+#
+# Secrets: /run/verity/secrets.env is written at boot by fetch-secrets.sh
+# from AWS Secrets Manager (instance role, no AWS keys anywhere) onto
+# tmpfs. /etc/verity/config.env holds only non-secret settings.
+
+x-hardening: &hardening
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "5" }
+
+services:
+  backend:
+    <<: *hardening
+    image: ghcr.io/${GHCR_OWNER}/invoice-agent:${IMAGE_TAG}
+    env_file:
+      - /etc/verity/config.env
+      - /run/verity/secrets.env
+    # One worker (CLAUDE.md: more OOM small boxes); cap open connections,
+    # SSE streams included, so a flood can't exhaust the process.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000",
+              "--workers", "1", "--limit-concurrency", "64", "--no-server-header"]
+    volumes:
+      - checkpoint_data:/app/checkpoints
+      - upload_data:/app/uploads
+      - inbox_data:/app/data/inbox
+    mem_limit: 900m
+    pids_limit: 256
+
+  frontend:
+    <<: *hardening
+    image: ghcr.io/${GHCR_OWNER}/verity-web:${IMAGE_TAG}
+    ports:
+      - "127.0.0.1:3000:3000"  # loopback only: nginx is the public edge
+    # Explicit list, no env_file: the frontend never receives the backend's
+    # secrets (Anthropic, Supabase secret key, Gmail App Password).
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY}
+      OWNER_USER_ID: ${OWNER_USER_ID}
+      ALLOWED_USER_IDS: ${ALLOWED_USER_IDS:-}
+      SITE_URL: ${SITE_URL}
+      API_INTERNAL_URL: http://backend:8000
+    read_only: true
+    tmpfs: ["/tmp"]
+    mem_limit: 384m
+    pids_limit: 128
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  checkpoint_data:
+  upload_data:
+  inbox_data:

@@ -14,22 +14,37 @@ so an inbox invoice gets the same live view, review and ledger as an upload.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import FileResponse
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
+from app.auth import require_owner
 from app.errors import ThreadNotFound, UpstreamUnavailable
 from app.uploads import sweep_old_uploads
 from invoice_agent.ingest_mcp import SOURCES, _extract_scalar_result, _extract_tool_result, _find_tool
 
-router = APIRouter()
+logger = logging.getLogger("app.inbox")
+
+# The inbox reads the owner's mailbox with their App Password - owner only,
+# on every route (download, mark and file serving included).
+router = APIRouter(dependencies=[Depends(require_owner)])
+
+# Each call spawns a subprocess and an IMAP login; cap how many run at once.
+_mcp_slots = asyncio.Semaphore(2)
+
+# fullmatch + ASCII: no trailing newline ("$" allows one), no non-ASCII digits/letters.
+_GMAIL_UID = re.compile(r"\d{1,10}", re.ASCII)
+_SAFE_PDF_NAME = re.compile(r"\w[\w .()-]{0,200}\.pdf", re.IGNORECASE | re.ASCII)
 
 Source = Literal["gmail", "filesystem"]
 
@@ -53,10 +68,13 @@ async def call_tool(source: Source, tool: str, args: dict[str, Any]) -> tuple[An
         }
     )
     try:
-        tools = await client.get_tools()
-        result = await _find_tool(tools, tool).ainvoke(args)
+        async with _mcp_slots:
+            tools = await client.get_tools()
+            result = await _find_tool(tools, tool).ainvoke(args)
     except Exception as exc:  # noqa: BLE001 - any MCP/server failure becomes one clean 503
-        raise UpstreamUnavailable(f"MCP {tool} ({source}) failed: {exc}") from exc
+        # Details (which can name env vars or IMAP responses) stay in the log.
+        logger.warning("MCP %s (%s) failed: %s", tool, source, type(exc).__name__)
+        raise UpstreamUnavailable(f"The {source} inbox isn't reachable right now.") from exc
     return result, round((time.perf_counter() - started) * 1000)
 
 
@@ -70,9 +88,18 @@ class InboxItemRequest(BaseModel):
     source: Source = "gmail"
     id: str
 
+    @model_validator(mode="after")
+    def _check_id(self) -> "InboxItemRequest":
+        # A Gmail id is one IMAP UID (never a set like "1:*"); a filesystem id
+        # is a bare PDF filename (no path segments).
+        pattern = _GMAIL_UID if self.source == "gmail" else _SAFE_PDF_NAME
+        if not pattern.fullmatch(self.id):
+            raise ValueError("invalid id for this source")
+        return self
+
 
 @router.get("/inbox")
-async def list_inbox(request: Request, source: Source = "gmail", limit: int = Query(10, ge=1, le=50)) -> dict:
+async def list_inbox(request: Request, source: Source = "gmail", limit: int = Query(10, ge=1, le=25)) -> dict:
     sweep_old_uploads(_inbox_dir(request))
     raw, ms = await call_tool(source, "list_pending_invoices", {"limit": limit})
     return {"tool": "list_pending_invoices", "ms": ms, "items": _extract_tool_result(raw) or []}

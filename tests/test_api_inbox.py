@@ -70,7 +70,30 @@ def test_mcp_failure_is_a_clean_503(client, monkeypatch):
 
     assert response.status_code == 503
     assert response.json()["error"] == "upstream_unavailable"
-    assert "GMAIL_ADDRESS" in response.json()["message"]
+    # Server-side detail (env var names, IMAP replies) never reaches the client.
+    assert "GMAIL" not in response.json()["message"]
+    assert "not set" not in response.json()["message"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"source": "gmail", "id": "1:*"},
+        {"source": "gmail", "id": "1,2"},
+        {"source": "gmail", "id": "abc"},
+        {"source": "gmail", "id": "101\n"},
+        {"source": "gmail", "id": "\u0661\u0660\u0661"},
+        {"source": "filesystem", "id": "x.pdf\n"},
+        {"source": "filesystem", "id": "../secret.pdf"},
+        {"source": "filesystem", "id": "notes.txt"},
+    ],
+)
+def test_rejects_unsafe_ids_before_any_mcp_call(client, monkeypatch, body):
+    calls = []
+    monkeypatch.setattr(inbox, "call_tool", _fake_call_tool({}, calls))
+    assert client.post("/inbox/mark", json=body).status_code == 422
+    assert client.post("/inbox/download", json=body).status_code == 422
+    assert calls == []
 
 
 def test_unknown_source_is_rejected(client):

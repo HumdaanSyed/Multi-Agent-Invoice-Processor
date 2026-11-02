@@ -253,8 +253,9 @@ def output(state: GraphState, config: Optional[RunnableConfig] = None) -> dict:
         db.insert_invoice({**invoice, "pdf_storage_path": pdf_storage_path})
     except Exception as exc:
         raise RuntimeError(
-            f"output failed persisting vendor={invoice.get('vendor_name')!r} "
-            f"invoice_number={invoice.get('invoice_number')!r} "
+            # thread_id, not vendor/invoice number: this text reaches logs
+            # and the checkpointer, and invoice contents stay out of both.
+            f"output failed persisting thread_id={_thread_id(config)!r} "
             f"(pdf_storage_path={pdf_storage_path!r} - already uploaded if set): {exc}"
         ) from exc
 
@@ -263,9 +264,8 @@ def output(state: GraphState, config: Optional[RunnableConfig] = None) -> dict:
     except Exception:
         logger.exception(
             "output: invoice persisted but insert_export_row failed for "
-            "vendor=%r invoice_number=%r",
-            invoice.get("vendor_name"),
-            invoice.get("invoice_number"),
+            "thread_id=%s",
+            _thread_id(config),
         )
         ledger_status = "failed"
     else:

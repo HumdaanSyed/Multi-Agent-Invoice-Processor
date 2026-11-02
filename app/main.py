@@ -12,6 +12,7 @@ real .env file - see tests/test_api_routes.py.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sqlite3
 from contextlib import asynccontextmanager
@@ -19,45 +20,16 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from app.errors import register_exception_handlers
+from app.owners import ThreadOwners
 from app.service import DEFAULT_MAX_CONCURRENCY, GraphService
 from invoice_agent import events, tracing
 from invoice_agent.graph import build_graph
 
-DEFAULT_CORS_ORIGINS = "http://localhost:3000,http://127.0.0.1:3000"
-
-
-def _cors_origins() -> list[str]:
-    raw = os.environ.get("CORS_ALLOW_ORIGINS") or DEFAULT_CORS_ORIGINS
-    return [origin.strip() for origin in raw.split(",") if origin.strip()]
-
-
-class _EnvAwareCORSMiddleware(CORSMiddleware):
-    """CORSMiddleware, but re-reads CORS_ALLOW_ORIGINS from the environment
-    on every request instead of baking a list in at construction time.
-
-    `app = create_app()` runs at module scope (uvicorn's ASGI-app-discovery
-    convention - see this module's docstring), which is import time, not
-    serve time. `load_dotenv()` must stay confined to the lifespan (it only
-    runs once the ASGI server actually starts serving) so importing this
-    module stays side-effect-free, per this module's own docstring and
-    invoice_agent/graph.py's get_graph() convention - but that means a
-    static `allow_origins=_cors_origins()` passed to the base class's
-    `__init__` would only ever see the hardcoded default, never a value set
-    only in .env, since .env hasn't been loaded yet at that point. Checking
-    the environment fresh on every request instead means it's always
-    correct by the time any real request arrives, without either module
-    import doing file I/O.
-    """
-
-    def is_allowed_origin(self, origin: str) -> bool:
-        if self.allow_origin_regex is not None and self.allow_origin_regex.fullmatch(origin):
-            return True
-        return origin in _cors_origins()
+logger = logging.getLogger("app.main")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CHECKPOINT_DB_PATH = REPO_ROOT / "checkpoints" / "graph.sqlite"
@@ -129,6 +101,12 @@ def create_app(*, checkpointer: Optional[BaseCheckpointSaver] = None, load_env: 
         upload_dir = _upload_dir()
         upload_dir.mkdir(parents=True, exist_ok=True)
 
+        # Run ownership lives beside the checkpoints (same SQLite file) so it
+        # survives restarts; an injected test checkpointer gets an in-memory one.
+        app.state.owners = ThreadOwners(str(_checkpoint_db_path()) if owns_connection else ":memory:")
+        if os.environ.get("AUTH_DISABLED", "").lower() == "true":
+            logger.warning("AUTH_DISABLED=true: the API is NOT authenticating requests. Dev/test only.")
+
         graph = build_graph(saver)
         app.state.graph_service = GraphService(graph, max_concurrency=_max_concurrency())
         app.state.upload_dir = upload_dir
@@ -141,6 +119,7 @@ def create_app(*, checkpointer: Optional[BaseCheckpointSaver] = None, load_env: 
             # here, on shutdown, so buffered spans aren't lost on SIGTERM.
             tracing.flush()
             events.bind_loop(None)
+            app.state.owners.close()
             if owns_connection:
                 conn = state.get("conn")
                 if conn is not None:
@@ -149,25 +128,14 @@ def create_app(*, checkpointer: Optional[BaseCheckpointSaver] = None, load_env: 
     app = FastAPI(title="Invoice Agent API", lifespan=lifespan)
     register_exception_handlers(app)
 
-    # Next.js dev server origin by default (Phase 8.5) - configurable via
-    # CORS_ALLOW_ORIGINS (comma-separated) for a deployed frontend origin.
-    # Not allow_origins=["*"]: an explicit list is the reviewable choice,
-    # and the SSE stream endpoint benefits the same as any other route -
-    # CORSMiddleware wraps a StreamingResponse with no special handling.
-    # _EnvAwareCORSMiddleware (not a static allow_origins=_cors_origins()
-    # list) because this call happens at import time, before load_env's
-    # load_dotenv() (deferred into the lifespan above, on purpose) has run.
-    app.add_middleware(
-        _EnvAwareCORSMiddleware,
-        allow_origins=(),
-        allow_credentials=False,
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["*"],
-    )
+    # No CORS middleware: the browser never calls this API directly. It goes
+    # through the same-origin Next.js /api proxy, so any cross-origin browser
+    # request is refused by default.
 
     from app.inbox import router as inbox_router
-    from app.routes import router
+    from app.routes import health_router, router
 
+    app.include_router(health_router)
     app.include_router(router)
     app.include_router(inbox_router)
 

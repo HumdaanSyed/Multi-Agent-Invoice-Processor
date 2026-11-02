@@ -142,11 +142,14 @@ export default function RunPage({ params }: PageProps<"/runs/[threadId]">) {
             )}
           </Card>
 
-          {/* Framed as "your changes weren't saved": ReviewForm stays mounted
-              through this (see showReviewForm above), so nothing typed is lost. */}
+          {/* During review, framed as "your changes weren't saved": ReviewForm stays
+              mounted through this (see showReviewForm above), so nothing typed is
+              lost. Other errors (upload, unknown run) aren't about edits. */}
           {error && (
             <ErrorBox>
-              <strong className="font-semibold">Couldn&apos;t save your changes: </strong>
+              <strong className="font-semibold">
+                {status === "needs_review" ? "Couldn't save your changes: " : "Something went wrong: "}
+              </strong>
               {error}
             </ErrorBox>
           )}

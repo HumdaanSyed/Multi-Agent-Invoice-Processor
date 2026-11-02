@@ -1,207 +1,288 @@
-# EC2 — documented deployment
+# AWS EC2 deployment (authenticated, HTTPS)
 
-Not the primary path (`deploy/railway.md` is) — this exists to show a
-from-scratch cloud deploy on a real 1GB-RAM box, and it's where
-`CLAUDE.md`'s "1GB RAM" pitfalls actually apply literally. Follows the
-roadmap's instructions closely: t3.micro, pull the CI-built images, never
-build on the box — for the Next.js frontend that's not just a preference,
-`next build` needs far more than 1GB, which is exactly why its image reads
-its backend URLs at runtime instead of baking them in (`web/Dockerfile`).
+One EC2 instance runs the whole stack: host nginx terminates TLS and proxies
+to the Next.js frontend, which reaches FastAPI over a private Docker network.
+Secrets come from AWS Secrets Manager through the instance's IAM role, so
+there are no AWS keys anywhere. Images are built by CI and pulled, never
+built on the box. Every file referenced here is in [`deploy/aws/`](aws/).
 
-## Setup
+```
+Internet ──443──▶ nginx (TLS, HSTS, rate limits, 21 MB body cap)
+         ──80───▶ 301 → https
+                    │ 127.0.0.1:3000
+                    ▼
+            frontend container  (session check, /api allowlist proxy)
+                    │ http://backend:8000  (compose network only, no host port)
+                    ▼
+            backend container   (JWT verify via JWKS, owner scoping, Gmail)
+                    │
+     Supabase (Auth, Postgres, Storage) · Anthropic · Langfuse · Gmail IMAP
+```
 
-1. **Launch the instance** — EC2 console → Launch Instance → Ubuntu Server
-   24.04 LTS (free-tier eligible AMI) → instance type `t3.micro`. Create or
-   reuse a key pair for SSH.
-2. **Security group** — allow inbound TCP `22` (SSH, restrict to your IP if
-   possible), `80` (HTTP), `443` (reserved for a future TLS pass — nothing
-   listens there yet, matching the roadmap's scope). No other ports: the
-   backend and frontend containers bind to `127.0.0.1` only, and nginx
-   (step 9) is the one thing that serves both on port 80.
-3. **Elastic IP** — allocate one and associate it with the instance.
-   Without this the public IP changes on every stop/start, which breaks
-   the DNS/bookmark you hand to anyone viewing the demo.
-4. **SSH in** and install Docker Engine + the compose plugin (the
-   `docker compose` subcommand, not standalone `docker-compose`):
-   ```bash
-   curl -fsSL https://get.docker.com | sudo sh
-   sudo usermod -aG docker $USER
-   newgrp docker
-   ```
-5. **Add 2GB swap** — a t3.micro's 1GB RAM is not enough headroom for
-   Docker itself plus a Python and a Node process under any memory pressure
-   (a large PDF, a slow GC pause). Without swap, the OOM killer takes the
-   container down instead of it just slowing down:
-   ```bash
-   sudo fallocate -l 2G /swapfile
-   sudo chmod 600 /swapfile
-   sudo mkswap /swapfile
-   sudo swapon /swapfile
-   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
-   ```
-6. **Make the GHCR package pullable — a one-time repo setting, not a
-   per-deploy step.** `.github/workflows/docker-build.yml` pushes using
-   the repo's built-in `GITHUB_TOKEN`, and GHCR packages default to
-   **private** visibility the first time they're created this way, even
-   though the source repo is public. Right after the workflow's first
-   successful run, check
-   `github.com/<owner>?tab=packages` → `invoice-agent` and `verity-web` → Package settings,
-   and if it shows private, either flip it to public (simplest, matches
-   this being a portfolio project with no real secrets in the image), or
-   keep it private and `docker login ghcr.io` on the box with a
-   classic PAT scoped to `read:packages`. The setting then persists
-   across every future push to the same package — nothing in CI resets
-   it — so this doesn't need repeating. The one case where it does: if
-   the package is ever deleted (not just its versions — the whole
-   package, e.g. via a repo/org transfer) and a later push recreates it
-   from scratch, it comes back private and this step needs redoing once.
-7. **Write the production compose file** on the box — deliberately not a
-   tracked repo file, since it references an image tag instead of
-   building locally (see "Why not commit a second compose file" below):
-   ```bash
-   mkdir -p ~/invoice-agent && cd ~/invoice-agent
-   cat > docker-compose.yml <<'EOF'
-   services:
-     backend:
-       image: ghcr.io/<owner>/invoice-agent:latest
-       mem_limit: 512m
-       env_file: [.env]
-       volumes:
-         - checkpoint_data:/app/checkpoints
-         - upload_data:/app/uploads
-       ports:
-         - "127.0.0.1:8000:8000"
-       restart: unless-stopped
+Placeholders used below: `verity.example.com` (your domain), `us-east-1`
+(your region), `ACCOUNT_ID`, `your-verity-backups` (an S3 bucket name you
+choose). Nothing here has been run against a real AWS account by the
+author of these files, so verify each step's output as you go.
 
-     frontend:
-       image: ghcr.io/<owner>/verity-web:latest
-       mem_limit: 256m
-       environment:
-         # V8 sizes its heap from the host's RAM by default, not from this
-         # container's limit - cap it so Node can't outgrow mem_limit.
-         NODE_OPTIONS: --max-old-space-size=192
-         # nginx (step 9) serves the frontend AND the backend's API paths on
-         # one origin, so the browser calls the same address it loaded the
-         # page from - no CORS to configure. Use the Elastic IP (or your
-         # domain) with no trailing slash.
-         API_PUBLIC_URL: http://<elastic-ip>
-         # The Next.js server reaches the backend over the compose network.
-         API_INTERNAL_URL: http://backend:8000
-       ports:
-         - "127.0.0.1:3000:3000"
-       depends_on:
-         backend:
-           condition: service_healthy
-       restart: unless-stopped
+## 0. What you need first
 
-   volumes:
-     checkpoint_data:
-     upload_data:
-   EOF
-   ```
-   Replace `<owner>` with the lowercased GitHub owner (`humdaansyed`) and
-   `<elastic-ip>` with the address from step 3. Both ports are bound to
-   `127.0.0.1` only — nginx (step 9) is the one thing allowed to reach
-   them from outside the box. The frontend needs no `.env` of its own:
-   it never sees `ANTHROPIC_API_KEY` or `SUPABASE_*`.
-8. **Add `.env`** in the same directory (`ANTHROPIC_API_KEY`,
-   `SUPABASE_URL`, `SUPABASE_KEY`, optional Langfuse vars) — copy it up
-   with `scp`, never type secrets directly into an SSH session's shell
-   history. Then:
-   ```bash
-   docker compose pull
-   docker compose up -d
-   ```
-9. **nginx reverse proxy**, port 80 → the frontend for pages, → the
-   backend for its API paths (both are on one origin, which is what
-   `API_PUBLIC_URL` above points at):
-   ```bash
-   sudo apt-get update && sudo apt-get install -y nginx
-   sudo tee /etc/nginx/sites-available/invoice-agent <<'EOF'
-   server {
-       listen 80;
-       client_max_body_size 25m;   # PDF uploads; the backend caps at 20MB
+- **A domain or subdomain** whose DNS you control. Let's Encrypt needs a
+  name, not a bare IP. A free DuckDNS subdomain works.
+- **Public GHCR images.** CI pushes `ghcr.io/<owner>/invoice-agent` and
+  `ghcr.io/<owner>/verity-web` on every push to `main`. In GitHub, open
+  Packages, then each package, then Package settings, and change visibility
+  to Public. The images contain no secrets (both `.dockerignore`s exclude
+  `.env*`). Note the commit SHA you want to deploy: it's the image tag.
+- **The Supabase owner UID.** Sign in once locally (see `docs/auth.md`); the
+  login page shows your UID if it isn't allowlisted yet.
 
-       # The backend's routes (app/routes.py plus FastAPI's built-in docs
-       # at /docs, /redoc, /openapi.json). This is a hand-kept copy of that
-       # route table: add a backend route and it must be added here too, or
-       # it 404s on EC2 only. The (/|$) keeps look-alike frontend paths
-       # such as /export-history on the frontend. None collide with the
-       # frontend's pages (/, /runs/...), /healthz, or its /_next assets.
-       location ~ ^/(invoices|export(\.csv|/status)|health|docs|redoc|openapi\.json)(/|$) {
-           proxy_pass http://127.0.0.1:8000;
-           proxy_http_version 1.1;
-           proxy_set_header Host $host;
-           proxy_set_header Connection "";
-           # POST /invoices blocks for the full extraction (15-40s), and the
-           # SSE stream stays open for the whole run - both need a read
-           # timeout longer than nginx's 60s default, and the stream must
-           # not be buffered or events arrive in one lump at the end.
-           proxy_read_timeout 300s;
-           proxy_buffering off;
-       }
+## 1. Supabase (dashboard)
 
-       location / {
-           proxy_pass http://127.0.0.1:3000;
-           proxy_http_version 1.1;
-           proxy_set_header Host $host;
-       }
-   }
-   EOF
-   sudo ln -sf /etc/nginx/sites-available/invoice-agent /etc/nginx/sites-enabled/
-   sudo rm -f /etc/nginx/sites-enabled/default
-   sudo nginx -t && sudo systemctl reload nginx
-   ```
-10. **systemd unit**, so a reboot brings the stack back without a manual
-    SSH session:
-    ```bash
-    sudo tee /etc/systemd/system/invoice-agent.service <<'EOF'
-    [Unit]
-    Description=Invoice Agent (docker compose)
-    Requires=docker.service
-    After=docker.service network-online.target
-    Wants=network-online.target
+1. **Authentication → URL Configuration:**
+   - Set **Site URL** to `https://verity.example.com`.
+   - Add `https://verity.example.com/auth/callback` to **Redirect URLs**.
+2. **Authentication → Sign In / Providers:** turn **Allow new users to sign
+   up** off, once your own account exists. The app's allowlist
+   (`OWNER_USER_ID`) already blocks everyone else, so this is a second
+   layer.
+3. **Google Cloud Console → your OAuth client:** the authorized redirect URI
+   stays `https://<project-ref>.supabase.co/auth/v1/callback`. It doesn't
+   change per deployment.
 
-    [Service]
-    Type=oneshot
-    RemainAfterExit=yes
-    WorkingDirectory=/home/ubuntu/invoice-agent
-    ExecStart=/usr/bin/docker compose up -d
-    ExecStop=/usr/bin/docker compose down
+## 2. Secrets Manager
 
-    [Install]
-    WantedBy=multi-user.target
-    EOF
-    sudo systemctl enable --now invoice-agent.service
-    ```
-11. **Verify** — visit `http://<elastic-ip>/` in a browser. The "Recent
-    runs" list loads and the footer shows the ledger row count; upload a
-    sample invoice from `data/eval/` and watch it extract and validate
-    live, then land on "needs review" or the completed detail view (the
-    repo's `data/eval/` has 20 synthetic invoices to upload; they are not
-    shipped in the images, and Verity has no built-in sample picker). This is
-    the roadmap's literal "Done when": reachable at a public URL,
-    processes an invoice live.
+Create one secret holding the backend's real secrets as JSON:
 
-## Why not commit a second compose file
+```bash
+aws secretsmanager create-secret --region us-east-1 --name verity/prod \
+  --secret-string file://secret.json   # then delete secret.json
+```
 
-The repo-root `docker-compose.yml` (Phase 10, local dev) uses `build:`
-so `docker compose up` works from a fresh clone with no image published
-yet. The EC2 box's compose file uses `image: ghcr.io/...` instead —
-CLAUDE.md's own pitfall ("don't build Docker images on a t3.micro, it
-OOMs — exit code 137"). These two are permanently different files serving
-different purposes, so keeping the production one inline in this doc
-(rather than a second tracked file that looks like it should stay in
-sync with the first but structurally can't) is the honest representation.
+`secret.json` holds only the actual secrets:
 
-## Known limitations
+```json
+{
+  "ANTHROPIC_API_KEY": "sk-ant-...",
+  "SUPABASE_KEY": "<service-role / secret key>",
+  "LANGFUSE_PUBLIC_KEY": "pk-lf-...",
+  "LANGFUSE_SECRET_KEY": "sk-lf-...",
+  "GMAIL_ADDRESS": "you@gmail.com",
+  "GMAIL_APP_PASSWORD": "xxxx xxxx xxxx xxxx"
+}
+```
 
-- **No automatic TLS.** Port 443 is open in the security group for a
-  future `certbot --nginx` pass; nothing terminates HTTPS yet, so this
-  URL is HTTP-only, unlike the Railway path.
-- **No automatic image updates.** A new push to `main` publishes new
-  `:latest` images in GHCR, but the box doesn't pull it — re-run
-  `docker compose pull && docker compose up -d` manually, or add a cron
-  job / Watchtower if you want that automated later.
-- **Single point of failure.** No load balancer, no second instance —
-  matches "documented to show AWS range," not a production HA setup.
+Run that from your own machine with your own credentials, not from the
+instance. The console works too: Store a new secret, choose Other type of
+secret, then Plaintext.
+
+## 3. S3 backup bucket
+
+- Create `your-verity-backups` in the same region. Keep **Block all public
+  access** on and default encryption (SSE-S3) on.
+- Add a lifecycle rule: prefix `checkpoints/`, expire current versions
+  after **30 days**.
+
+## 4. IAM role for the instance
+
+1. Go to IAM → Roles → Create role → AWS service → EC2.
+2. Attach the managed policy **AmazonSSMManagedInstanceCore**, so you get a
+   shell through Session Manager instead of SSH.
+3. Add an inline policy from [`aws/iam-policy.json`](aws/iam-policy.json),
+   replacing `REGION`, `ACCOUNT_ID` and `BACKUP_BUCKET`. The role can read
+   only that one secret and write only the backup prefix.
+4. Name the role `verity-ec2`.
+
+## 5. Security group
+
+| Direction | Port | Source | Why |
+|---|---|---|---|
+| Inbound | 443/tcp | 0.0.0.0/0, ::/0 | the app |
+| Inbound | 80/tcp | 0.0.0.0/0, ::/0 | HTTP→HTTPS redirect, and certbot renewal |
+| Inbound | 22/tcp | **none** (preferred), or your IP /32 only | use SSM Session Manager instead |
+| Outbound | all | 0.0.0.0/0 | Supabase, Anthropic, Langfuse, Gmail, GHCR, AWS APIs |
+
+Ports 3000 and 8000 are **not** opened. Docker publishes 3000 on
+127.0.0.1 only, and 8000 isn't published at all.
+
+## 6. Launch the instance
+
+- **AMI:** Ubuntu Server 24.04 LTS.
+- **Instance type:** `t3.small` (2 GB) recommended. A `t3.micro` (1 GB,
+  free tier) also works, but add the swap step in section 8.
+- **Storage:** 20 GB gp3, **encrypted**.
+- **Advanced details:**
+  - IAM instance profile: `verity-ec2`.
+  - Metadata version: **IMDSv2 only**.
+  - Metadata hop limit: 1 is fine. Only the host calls IMDS, never a
+    container.
+- **Security group:** the one from step 5.
+- **Elastic IP:** allocate one and associate it with the instance.
+
+## 7. DNS
+
+Point an **A record** for `verity.example.com` at the Elastic IP, then wait
+until `dig +short verity.example.com` returns it.
+
+## 8. Prepare the host
+
+Connect: EC2 → the instance → Connect → **Session Manager**.
+
+```bash
+sudo apt-get update && sudo apt-get -y upgrade
+sudo apt-get install -y docker.io docker-compose-v2 nginx certbot jq unattended-upgrades
+sudo snap install aws-cli --classic
+sudo systemctl enable --now docker
+aws sts get-caller-identity   # should show the verity-ec2 role, no keys configured
+```
+
+t3.micro only: add 2 GB of swap.
+
+```bash
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
+
+## 9. Install the app files
+
+```bash
+sudo git clone --depth 1 https://github.com/HumdaanSyed/Multi-Agent-Invoice-Processor.git /opt/verity-src
+sudo install -d -m 755 /opt/verity /etc/verity
+sudo install -m 644 /opt/verity-src/deploy/aws/docker-compose.yml /opt/verity/
+sudo install -m 750 /opt/verity-src/deploy/aws/fetch-secrets.sh /opt/verity-src/deploy/aws/backup.sh /opt/verity/
+sudo install -m 644 /opt/verity-src/deploy/aws/verity.service /etc/systemd/system/
+sudo install -m 600 /opt/verity-src/deploy/aws/config.env.example /etc/verity/config.env
+sudo nano /etc/verity/config.env    # fill in every value; IMAGE_TAG = the commit SHA
+```
+
+Test the secrets fetch. It prints a count, never values:
+
+```bash
+sudo /opt/verity/fetch-secrets.sh
+sudo ls -l /run/verity/secrets.env   # -rw------- root root
+```
+
+## 10. TLS certificate and nginx
+
+Get the certificate first, with nginx stopped so certbot can use port 80.
+The hooks are saved, so automatic renewal (the `certbot.timer` the package
+installs) repeats this stop/start by itself.
+
+```bash
+sudo systemctl stop nginx
+sudo certbot certonly --standalone -d verity.example.com \
+  --agree-tos -m you@example.com --no-eff-email \
+  --pre-hook "systemctl stop nginx" --post-hook "systemctl start nginx"
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo install -m 644 /opt/verity-src/deploy/aws/nginx-verity.conf /etc/nginx/conf.d/verity.conf
+sudo sed -i 's/verity.example.com/YOUR.DOMAIN/g' /etc/nginx/conf.d/verity.conf
+sudo nginx -t && sudo systemctl start nginx
+sudo certbot renew --dry-run
+```
+
+## 11. Start
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now verity
+sudo docker compose -f /opt/verity/docker-compose.yml --env-file /etc/verity/config.env ps
+```
+
+Both containers should reach `healthy`. That can take about 30 seconds.
+
+## 12. Verify
+
+From your laptop:
+
+```bash
+curl -sI http://verity.example.com | head -1            # 301
+curl -sI https://verity.example.com/healthz | head -1   # 200
+curl -s  https://verity.example.com/api/invoices        # {"error":"not_authenticated",...}
+curl -s  https://verity.example.com/api/health/ready    # 401: deep readiness isn't reachable anonymously
+curl -m 5 http://verity.example.com:8000/health         # must time out / be refused
+curl -m 5 http://verity.example.com:3000/               # must time out / be refused
+curl -sI https://verity.example.com | grep -i strict    # HSTS header present
+```
+
+In a browser, sign in with Google. You should land on the home page with
+your email in the header. Upload an invoice from `data/eval/` and watch it
+stream live. A second Google account should see "doesn't have access".
+
+## 13. Backups
+
+The only state unique to this box is the LangGraph checkpoint SQLite file:
+runs, review state and run ownership. Invoices and the ledger live in
+Supabase, and PDFs in Supabase Storage.
+
+```bash
+sudo /opt/verity/backup.sh     # run once by hand first
+echo 'PATH=/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+17 3 * * * root /opt/verity/backup.sh >> /var/log/verity-backup.log 2>&1' | sudo tee /etc/cron.d/verity-backup
+```
+
+Retention is 7 local copies in `/var/backups/verity`, plus 30 days in S3
+through the lifecycle rule. For whole-disk recovery, also add an EBS
+snapshot policy in **EC2 → Lifecycle Manager**, e.g. daily with 7 kept.
+
+## Operations
+
+**Logs.** Container stdout is json-file, rotated at 10 MB × 5. Auth
+failures log only the exception class, and invoice contents aren't logged.
+
+```bash
+sudo journalctl -u verity                    # start/stop, secrets fetch
+sudo docker compose -f /opt/verity/docker-compose.yml --env-file /etc/verity/config.env logs -f --tail 200
+sudo tail -f /var/log/nginx/access.log /var/log/nginx/error.log
+```
+
+**Deploy a new version.** Set `IMAGE_TAG` in `/etc/verity/config.env` to
+the new commit SHA, then:
+
+```bash
+sudo docker compose -f /opt/verity/docker-compose.yml --env-file /etc/verity/config.env pull
+sudo systemctl restart verity
+```
+
+**Roll back.** Set `IMAGE_TAG` back to the previous SHA and run the same
+two commands. The checkpoint schema is LangGraph's own, so rolling back
+across a LangGraph major version may need a restore as well.
+
+**Rotate a secret.** Update the value in Secrets Manager, then run
+`sudo systemctl restart verity`. The unit re-fetches on every start.
+- **Gmail App Password:** revoke the old one at
+  myaccount.google.com/apppasswords.
+- **Supabase secret key:** roll it in Project Settings → API Keys.
+
+**Restore the checkpoint DB** (new instance or corruption):
+
+```bash
+aws s3 cp s3://your-verity-backups/checkpoints/graph-<stamp>.sqlite.gz /tmp/ && gunzip /tmp/graph-<stamp>.sqlite.gz
+C="sudo docker compose -f /opt/verity/docker-compose.yml --env-file /etc/verity/config.env"
+$C stop backend frontend
+$C run --rm --no-deps -T backend sh -c 'rm -f checkpoints/graph.sqlite-wal checkpoints/graph.sqlite-shm && cat > checkpoints/graph.sqlite' < /tmp/graph-<stamp>.sqlite
+sudo systemctl restart verity
+```
+
+That writes the file as the container's own non-root user, so permissions
+stay correct.
+
+**Instance lost.** Repeat steps 6–12 with the same role and security group,
+move the Elastic IP across, then restore the checkpoint DB as above.
+Everything else lives in Supabase.
+
+## What this doesn't do
+
+- **Single instance, single uvicorn worker.** There's no HA and no
+  zero-downtime deploys; a restart is a few seconds of 502s. This is fine
+  for a single-owner tool. Scaling out would need the checkpointer moved
+  to Postgres first, since SQLite on local disk is per-box.
+- **Secrets on the instance are root-readable.** They're fetched to tmpfs,
+  but Docker stores each container's environment in its config under
+  `/var/lib/docker` (root-only, encrypted EBS). Anyone with root or a disk
+  snapshot can read them, so restrict who can start SSM sessions and
+  snapshot the volume.
+- **No WAF or CloudFront.** nginx rate limits are per source IP.
+- **Owner-only Gmail with an App Password** (see `docs/auth.md` for the
+  per-user OAuth migration).
+- **`deploy/railway.md` predates authentication.** It has not been
+  re-verified with the auth changes.

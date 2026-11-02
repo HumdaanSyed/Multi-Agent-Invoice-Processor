@@ -48,6 +48,23 @@ class ApiError(Exception):
         self.thread_id = thread_id
 
 
+class NotAuthenticated(ApiError):
+    """401: no bearer token, or one that fails verification. The message is
+    deliberately the same for every cause, so a caller learns nothing about
+    *why* a token was rejected."""
+
+    status_code = 401
+    code = "not_authenticated"
+
+
+class Forbidden(ApiError):
+    """403: a verified user who isn't allowed this app, this run, or the
+    owner-only Gmail/ledger routes."""
+
+    status_code = 403
+    code = "forbidden"
+
+
 class ThreadNotFound(ApiError):
     status_code = 404
     code = "thread_not_found"

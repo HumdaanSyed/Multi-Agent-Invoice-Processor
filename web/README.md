@@ -37,15 +37,18 @@ event.
 
 ## Configuration
 
-Backend URLs are read at **request time**, not build time, so one prebuilt
-image serves any deployment (`lib/config.ts`, `app/layout.tsx`):
+All read at **request time**, not build time, so one prebuilt image serves
+any deployment. Copy `.env.example` to `.env.local` for dev.
 
-- `API_PUBLIC_URL` — what the *browser* calls (client fetches, the SSE
-  stream, the CSV link). The backend's `CORS_ALLOW_ORIGINS` must include
-  this app's origin unless both are served from one origin.
-- `API_INTERNAL_URL` — what the Next.js *server* calls (the home page's
-  recent-runs list). Only needed when it differs from `API_PUBLIC_URL`,
-  e.g. `http://backend:8000` inside Docker Compose.
+- `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY` — Supabase Auth (Google
+  sign-in). Publishable key only; no secret key ever reaches this app.
+- `OWNER_USER_ID` (+ optional `ALLOWED_USER_IDS`) — who may sign in.
+- `API_INTERNAL_URL` — where this server reaches FastAPI
+  (`http://backend:8000` under Compose). The browser never calls FastAPI:
+  it calls this app's `/api` proxy, which forwards the user's token.
+- `SITE_URL` — public origin for OAuth redirects behind a reverse proxy.
+
+How auth works end to end: [`../docs/auth.md`](../docs/auth.md).
 
 ## Docker
 
