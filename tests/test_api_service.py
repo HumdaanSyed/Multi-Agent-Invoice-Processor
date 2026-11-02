@@ -239,11 +239,18 @@ def test_build_resume_command_empty_patch_means_accept_as_is():
     assert command.resume == {"edited_invoice": None}
 
 
+def test_build_resume_command_unchanged_full_form_means_accept_as_is():
+    # The review form resubmits every field even when nothing was edited.
+    snapshot = _interrupted_snapshot(GOOD_INVOICE, ["some flag"])
+    command = build_resume_command(snapshot, InvoiceCorrections(**GOOD_INVOICE))
+    assert command.resume == {"edited_invoice": None}
+
+
 def test_build_resume_command_merges_patch_without_wiping_other_fields():
     snapshot = _interrupted_snapshot(GOOD_INVOICE, ["Subtotal + tax = 10.00 but total is 12.00"])
-    command = build_resume_command(snapshot, InvoiceCorrections(total=10.0))
+    command = build_resume_command(snapshot, InvoiceCorrections(total=11.0))
     edited = command.resume["edited_invoice"]
-    assert edited["total"] == 10.0
+    assert edited["total"] == 11.0
     assert edited["vendor_name"] == "Acme Corp"
     # The failure mode this guards against: a naive pass-through resume
     # that let line_items go missing would make db.insert_invoice run an

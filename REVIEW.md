@@ -49,6 +49,13 @@ Flag, at high severity, any change where:
 - Validation logic (math tolerance, date parsing, duplicate detection)
   moves into a prompt or an LLM call instead of staying plain Python.
 
+Intentional exception: `route_after_validation` sends a still-flagged
+invoice to `output` when `approved` is set, i.e. the reviewer approved it
+*unchanged* (`build_resume_command` maps an unchanged full form to
+`edited_invoice: None`). That's a human override, and the validator still
+ran right before output on that exact data. Don't flag it. Do flag any path
+that sets `approved` when the invoice was edited.
+
 This class of bug bit us twice already (Phase 3 and Phase 4 reviews): an
 `output`/persistence step reachable from `human_review` without looping back
 through `validator` first. If you see that shape again, it's a repeat, not a

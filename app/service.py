@@ -157,7 +157,12 @@ def build_resume_command(snapshot: StateSnapshot, corrections: InvoiceCorrection
     except ValidationError as exc:
         raise InvalidInvoice(f"Corrected invoice failed validation: {exc}") from exc
 
-    return Command(resume={"edited_invoice": canonical.model_dump(mode="json")})
+    edited = canonical.model_dump(mode="json")
+    # The review form always sends every field, so "nothing changed" has to be
+    # detected here: an unchanged invoice is an approval, not an edit.
+    if edited == Invoice.model_validate(base_invoice).model_dump(mode="json"):
+        return Command(resume={"edited_invoice": None})
+    return Command(resume={"edited_invoice": edited})
 
 
 class GraphService:

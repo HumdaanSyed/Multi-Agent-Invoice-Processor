@@ -56,6 +56,8 @@ class GraphState(TypedDict):
     messages: Annotated[list, add_messages]
     pdf_storage_path: Optional[str]
     ledger_status: Optional[str]
+    # Set by human_review: True when the reviewer approved the invoice unchanged.
+    approved: Optional[bool]
 
 
 logger = logging.getLogger("invoice_agent.graph")
@@ -63,9 +65,15 @@ logger = logging.getLogger("invoice_agent.graph")
 ROUTER_MODEL = "claude-sonnet-5"
 ROUTER_MAX_TOKENS = 256
 ROUTER_PROMPT = (
-    "Classify this document as one of: invoice, receipt, or other. "
-    "An invoice requests payment for goods/services rendered. A receipt "
-    "confirms a payment already made. Anything else is 'other'."
+    "Classify this document as one of: invoice, receipt, or other.\n"
+    "- invoice: a bill a seller issues for goods or services, identified by an "
+    "invoice number and usually seller/buyer details, line items and tax - in any "
+    "language (e.g. 'Rechnung', 'Facture', 'Tax invoice'). It is still an invoice "
+    "if it has already been paid, e.g. an online order paid by card.\n"
+    "- receipt: proof of payment with no invoice number, such as a till or "
+    "point-of-sale receipt or a payment confirmation.\n"
+    "- other: anything else, e.g. terms and conditions, contracts, letters, "
+    "statements."
 )
 
 
@@ -219,8 +227,8 @@ def human_review(state: GraphState, config: Optional[RunnableConfig] = None) -> 
 
     edited_invoice = resume_value.get("edited_invoice") if resume_value else None
     if edited_invoice is not None:
-        return {"invoice": edited_invoice, "status": "reviewed"}
-    return {"status": "reviewed"}
+        return {"invoice": edited_invoice, "status": "reviewed", "approved": False}
+    return {"status": "reviewed", "approved": True}
 
 
 def output(state: GraphState, config: Optional[RunnableConfig] = None) -> dict:
@@ -279,8 +287,14 @@ def route_after_classification(state: GraphState) -> str:
 
 
 def route_after_validation(state: GraphState) -> str:
-    """Conditional edge: flagged invoices go to human review, clean ones straight to output."""
-    if state["validation"]["needs_review"]:
+    """Conditional edge: flagged invoices go to human review, clean ones straight to output.
+
+    A reviewer who approves the invoice unchanged has overridden the flags
+    (e.g. VAT-inclusive line items that legitimately don't sum to a net
+    subtotal), so it goes to output instead of re-interrupting forever. The
+    validator still runs right before output on the exact data saved.
+    """
+    if state["validation"]["needs_review"] and not state.get("approved"):
         return "human_review"
     return "output"
 

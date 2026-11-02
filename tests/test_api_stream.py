@@ -196,8 +196,7 @@ def test_stream_flagged_run_emits_interrupted_and_stays_open(monkeypatch):
 
 
 def test_resume_still_flagged_republishes_validation_events(monkeypatch):
-    """A resume that doesn't actually fix anything (empty corrections -
-    build_resume_command's "accept as-is" path) re-enters at
+    """A resume whose edit doesn't fix the flagged issue re-enters at
     human_review -> validator (invoice_agent/graph.py's unconditional
     edge) and re-flags the identical issue - the channel stays open (an
     interrupt never closes it), so both passes' events are readable in
@@ -212,7 +211,7 @@ def test_resume_still_flagged_republishes_validation_events(monkeypatch):
             files={"file": ("invoice.pdf", b"%PDF-1.4\nfake", "application/pdf")},
         )
 
-        resume = client.post(f"/invoices/{thread_id}/resume", json={"corrections": {}})
+        resume = client.post(f"/invoices/{thread_id}/resume", json={"corrections": {"bill_to": "Someone Else"}})
         assert resume.status_code == 200
         assert resume.json()["status"] == "needs_review"
         assert events.has_channel(thread_id) is True
@@ -225,6 +224,21 @@ def test_resume_still_flagged_republishes_validation_events(monkeypatch):
         assert event_types.count("check") == 12
         assert event_types.count("interrupted") == 2
         assert event_types[-1] == "interrupted"
+
+
+def test_resume_unchanged_approval_overrides_flags(monkeypatch):
+    """Approving the flagged invoice as-is (no edits) saves it instead of
+    re-interrupting on the same flags forever."""
+    with _make_client(monkeypatch, invoice=FLAWED_INVOICE) as client:
+        thread_id = _reserve(client)
+        client.post(
+            "/invoices",
+            data={"thread_id": thread_id},
+            files={"file": ("invoice.pdf", b"%PDF-1.4\nfake", "application/pdf")},
+        )
+        resume = client.post(f"/invoices/{thread_id}/resume", json={"corrections": {}})
+        assert resume.status_code == 200
+        assert resume.json()["status"] == "completed"
 
 
 def test_resume_to_success_closes_channel(monkeypatch):

@@ -390,7 +390,7 @@ export function ReviewForm({
           {disabled ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <ShieldCheck className="size-4" aria-hidden />}
           {disabled ? "Saving…" : "Approve and save"}
         </button>
-        <span className="text-xs text-slate-500">Your corrections are checked again before anything is saved.</span>
+        <span className="text-xs text-slate-500">Edits are checked again before saving. Approving without edits saves it as-is.</span>
       </div>
     </div>
   );
